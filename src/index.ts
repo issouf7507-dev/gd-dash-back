@@ -4,9 +4,8 @@ import { logger } from './lib/logger.ts'
 import { prisma } from './lib/prisma.ts'
 import { demarrerReleve } from './modules/import-mail/service.ts'
 
-const server = createApp().listen(env.PORT, () => {
-  logger.info(`API GD démarrée sur http://localhost:${env.PORT}/api`)
-})
+const onListen = () => logger.info(`API GD démarrée sur http://${env.HOST ?? 'localhost'}:${env.PORT}/api`)
+const server = env.HOST ? createApp().listen(env.PORT, env.HOST, onListen) : createApp().listen(env.PORT, onListen)
 
 // Relève des mails de devis SolutionsBTP (si IMPORT_MAIL_SOURCE est renseigné)
 const arreterReleve = demarrerReleve()

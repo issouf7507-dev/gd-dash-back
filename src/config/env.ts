@@ -4,6 +4,8 @@ import { z } from 'zod'
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(4000),
+  /** Interface d'écoute. En production : 127.0.0.1, pour que l'API ne soit joignable que par Nginx. Vide : toutes. */
+  HOST: z.string().optional().transform((v) => v || undefined),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   DATABASE_URL: z.string().startsWith('mysql://', 'DATABASE_URL doit commencer par mysql://'),
   CORS_ORIGIN: z.string().min(1),
