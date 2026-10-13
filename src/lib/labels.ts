@@ -7,8 +7,27 @@ import {
   type StatutConducteur as StatutConducteurLabel,
   type TypeClient as TypeClientLabel,
   type Role as RoleLabel,
+  type NiveauRelance as NiveauRelanceLabel,
+  type Relance,
+  type StatutChantier as StatutChantierLabel,
+  type StatutFactureSaisi,
+  type TypeIntervenant as TypeIntervenantLabel,
 } from '@gd/shared/types'
-import { Categorie, Role, TypeClient, Planification, RelanceDevis, StatutADCI, StatutConducteur, StatutImport } from '../generated/prisma/client.ts'
+import {
+  Categorie,
+  DestinataireRelance,
+  NiveauRelance,
+  Planification,
+  RelanceDevis,
+  Role,
+  StatutADCI,
+  StatutChantier,
+  StatutConducteur,
+  StatutFacture,
+  StatutImport,
+  TypeClient,
+  TypeIntervenant,
+} from '../generated/prisma/client.ts'
 
 export const ROLE_LABELS: Record<Role, RoleLabel> = {
   DIRECTION: 'Direction',
@@ -66,4 +85,22 @@ export const typeClient = mapping<TypeClient, TypeClientLabel>({
   ARCHITECTE: 'Architecte',
   PARTICULIER: 'Particulier',
   ENTREPRISE: 'Entreprise',
+})
+
+// ─── Intervenants, chantiers, factures ───────────────────────
+
+export const typeIntervenant = mapping<TypeIntervenant, TypeIntervenantLabel>({ INTERNE: 'Interne', SOUS_TRAITANT: 'Sous-traitant' })
+export const statutChantier = mapping<StatutChantier, StatutChantierLabel>({
+  A_VENIR: 'À venir',
+  EN_ATTENTE_SIGNATURE: 'En attente signature',
+  EN_COURS: 'En cours',
+  EN_STAND_BY: 'En stand-by',
+  TERMINE: 'Terminé',
+  ANNULE: 'Annulé',
+})
+export const statutFacture = mapping<StatutFacture, StatutFactureSaisi>({ A_VALIDER: 'À valider', VALIDEE: 'Validée' })
+export const niveauRelance = mapping<NiveauRelance, NiveauRelanceLabel>({ R1: 'R1', R2: 'R2', R3: 'R3', MD: 'MD' })
+export const destinataireRelance = mapping<DestinataireRelance, Relance['destinataire']>({
+  CLIENT: 'client',
+  CHARGE_AFFAIRES: "chargé d'affaires",
 })
