@@ -9,7 +9,7 @@ concurrency:
   group: deploy-api
   cancel-in-progress: false # ne jamais couper un déploiement en cours
 
-# Le code partagé (@gd/shared) vit dans le dépôt du front : on clone les deux côte à côte,
+# Le code partagé (@gd/shared) vit dans le dépôt du front (cloné avec la clé FRONT_REPO_SSH_KEY) : on clone les deux côte à côte,
 # comme en local (server/ et dgdashboard/shared/), pour que `link:../dgdashboard/shared` se résolve.
 defaults:
   run:
@@ -40,7 +40,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: issouf7507-dev/gd-dash-front
-          token: ${{ secrets.FRONT_REPO_TOKEN }}
+          ssh-key: ${{ secrets.FRONT_REPO_SSH_KEY }} # clé de déploiement en lecture seule sur gd-dash-front
           path: dgdashboard
           sparse-checkout: shared
       - uses: pnpm/action-setup@v4
@@ -79,7 +79,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: issouf7507-dev/gd-dash-front
-          token: ${{ secrets.FRONT_REPO_TOKEN }}
+          ssh-key: ${{ secrets.FRONT_REPO_SSH_KEY }} # clé de déploiement en lecture seule sur gd-dash-front
           path: dgdashboard
           sparse-checkout: shared
 
