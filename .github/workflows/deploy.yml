@@ -69,7 +69,8 @@ jobs:
       SSH_HOST: ${{ secrets.SSH_HOST }}
       SSH_USER: ${{ secrets.SSH_USER }}
       SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
-      APP_DIR: /home/issouf/apps/gd-gest
+      # Relatif au dossier personnel de SSH_USER sur le VPS (~/apps/gd-gest)
+      APP_DIR: apps/gd-gest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -159,7 +160,7 @@ jobs:
             echo "::endgroup::"
           }
           trap diag ERR
-          cd /home/issouf/apps/gd-gest/back
+          cd ~/apps/gd-gest/back
           [ -f .env ] || { echo "::error::$PWD/.env absent : le créer sur le VPS avant le premier déploiement."; exit 1; }
           pnpm install --frozen-lockfile
           pnpm exec prisma generate
