@@ -34,6 +34,14 @@ devisRouter.get('/', async (_req, res) => {
   ok(res, devis.map(toDevisDto))
 })
 
+// Suppression groupée (sélection dans la liste) : déclarée avant les routes /:id
+const idsSchema = z.object({ ids: z.array(z.string().min(1)).min(1).max(500) })
+devisRouter.post('/supprimer', canDelete, validate({ body: idsSchema }), async (_req, res) => {
+  const { ids } = res.locals.body as z.infer<typeof idsSchema>
+  const { count } = await prisma.devis.deleteMany({ where: { id: { in: ids } } })
+  ok(res, { count })
+})
+
 devisRouter.get('/:id', validate({ params: idParams }), async (_req, res) => {
   const d = await prisma.devis.findUnique({ where: { id: res.locals.params.id } })
   if (!d) throw new NotFoundError('Devis introuvable')

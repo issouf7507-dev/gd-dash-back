@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { ConflictError, ForbiddenError, NotFoundError } from '../../lib/app-error.ts'
 import { Role, roleKey, roleLabel } from '../../lib/labels.ts'
 import { hashPassword, PASSWORD_RULE, PASSWORD_RULE_MESSAGE } from '../../lib/password.ts'
-import { isUniqueViolation } from '../../lib/prisma-errors.ts'
+import { isForeignKeyViolation, isUniqueViolation } from '../../lib/prisma-errors.ts'
 import { prisma } from '../../lib/prisma.ts'
 import { ok } from '../../lib/response.ts'
 import { requireAuth, requireRole } from '../../middleware/auth.ts'
@@ -87,4 +87,20 @@ utilisateursRouter.patch('/:id', validate({ params: idParams, body: updateSchema
     if (isUniqueViolation(err)) throw new ConflictError('Un utilisateur existe déjà avec cet email')
     throw err
   }
+})
+
+// Refusée si l'utilisateur a un historique (devis, chantiers, observations…) : on le désactive à la place
+utilisateursRouter.delete('/:id', validate({ params: idParams }), async (_req, res) => {
+  const id = res.locals.params.id as string
+  if (id === res.locals.user!.id) throw new ForbiddenError('Vous ne pouvez pas supprimer votre propre compte')
+  const user = await prisma.utilisateur.findUnique({ where: { id }, select: { _count: { select: { devisConduits: true } } } })
+  if (!user) throw new NotFoundError('Utilisateur introuvable')
+  const historique = 'Cet utilisateur a un historique (devis, chantiers…) : désactivez-le plutôt'
+  // Les devis passeraient sinon sans conducteur (onDelete: SetNull) : on refuse aussi ce cas
+  if (user._count.devisConduits > 0) throw new ConflictError(historique)
+  await prisma.utilisateur.delete({ where: { id } }).catch((err) => {
+    if (isForeignKeyViolation(err)) throw new ConflictError(historique)
+    throw err
+  })
+  ok(res, { id })
 })
