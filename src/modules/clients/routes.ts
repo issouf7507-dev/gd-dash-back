@@ -4,7 +4,7 @@ import { z } from 'zod'
 import type { Client } from '../../generated/prisma/client.ts'
 import { ConflictError, NotFoundError } from '../../lib/app-error.ts'
 import { Role, typeClient } from '../../lib/labels.ts'
-import { isUniqueViolation } from '../../lib/prisma-errors.ts'
+import { isForeignKeyViolation, isUniqueViolation } from '../../lib/prisma-errors.ts'
 import { prisma } from '../../lib/prisma.ts'
 import { ok } from '../../lib/response.ts'
 import { requireAuth, requireRole } from '../../middleware/auth.ts'
@@ -24,6 +24,7 @@ clientsRouter.use(requireAuth)
 
 // Création / modification : direction, admin, et ADCI (qui crée les clients à l'import des devis)
 const canWrite = requireRole(Role.DIRECTION, Role.ADMIN, Role.ADCI)
+const canDelete = requireRole(Role.DIRECTION, Role.ADMIN)
 
 const idParams = z.object({ id: z.string().min(1) })
 const createSchema = z.object({
@@ -63,4 +64,15 @@ clientsRouter.patch('/:id', canWrite, validate({ params: idParams, body: updateS
   if (!(await prisma.client.findUnique({ where: { id }, select: { id: true } }))) throw new NotFoundError('Client introuvable')
   const c = await prisma.client.update({ where: { id }, data: { ...data, ...(type && { type: typeClient.key(type) }) } }).catch(conflict)
   ok(res, toClientDto(c))
+})
+
+// Refusée tant que le client a des devis, interventions ou chantiers
+clientsRouter.delete('/:id', canDelete, validate({ params: idParams }), async (_req, res) => {
+  const id = res.locals.params.id as string
+  if (!(await prisma.client.findUnique({ where: { id }, select: { id: true } }))) throw new NotFoundError('Client introuvable')
+  await prisma.client.delete({ where: { id } }).catch((err) => {
+    if (isForeignKeyViolation(err)) throw new ConflictError('Ce client a encore des devis, interventions ou chantiers : supprimez-les d’abord')
+    throw err
+  })
+  ok(res, { id })
 })
