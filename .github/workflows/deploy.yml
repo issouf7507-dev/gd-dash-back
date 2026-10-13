@@ -116,22 +116,30 @@ jobs:
             && [ -s ~/.ssh/known_hosts ] \
             || { echo "::error::VPS injoignable sur $SSH_HOST:$SSH_PORT (SSH_HOST/SSH_PORT faux, ou port SSH filtré par un pare-feu / fail2ban)."; exit 1; }
 
+      - name: Tester la connexion SSH
+        run: |
+          # Empreinte de la clé envoyée : la comparer avec `ssh-keygen -lf ~/.ssh/authorized_keys` sur le VPS
+          echo "Clé utilisée : $(ssh-add -l)"
+          # BatchMode : jamais de repli sur le mot de passe (impossible ici), l'erreur reste claire
+          ssh -o BatchMode=yes -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" 'echo "Connecté en $(whoami) sur $(hostname)"' \
+            || { echo "::error::Le VPS refuse cette clé pour SSH_USER : clé publique absente de ~/.ssh/authorized_keys de cet utilisateur, SSH_USER erroné, ou SSH_PRIVATE_KEY qui n'est pas la bonne clé."; exit 1; }
+
       - name: Envoyer le code (API + @gd/shared)
         working-directory: .
         run: |
-          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "mkdir -p $APP_DIR/back $APP_DIR/dgdashboard/shared"
-          rsync -az --delete -e "ssh -p $SSH_PORT" \
+          ssh -o BatchMode=yes -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "mkdir -p $APP_DIR/back $APP_DIR/dgdashboard/shared"
+          rsync -az --delete -e "ssh -o BatchMode=yes -p $SSH_PORT" \
             dgdashboard/shared/ "$SSH_USER@$SSH_HOST:$APP_DIR/dgdashboard/shared/"
           # data/ : PDF des devis importés sur le serveur, ne jamais les effacer
           rsync -az --delete \
             --exclude '.git' --exclude '.github' --exclude 'node_modules' \
             --exclude 'dist' --exclude 'src/generated' --exclude '.env' --exclude 'data' \
-            -e "ssh -p $SSH_PORT" \
+            -e "ssh -o BatchMode=yes -p $SSH_PORT" \
             server/ "$SSH_USER@$SSH_HOST:$APP_DIR/back/"
 
       - name: Installer, migrer, redémarrer
         run: |
-          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" bash -s << 'EOF'
+          ssh -o BatchMode=yes -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" bash -s << 'EOF'
           set -euo pipefail
           # Session non interactive : charger Node (nvm s'il est installé, sinon le PATH système).
           export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
@@ -169,5 +177,5 @@ jobs:
 
       - name: Vérifier que l'API répond
         run: |
-          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+          ssh -o BatchMode=yes -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
             'for i in $(seq 1 10); do curl -fsS http://127.0.0.1:4500/api/health && exit 0; sleep 2; done; exit 1'
