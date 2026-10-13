@@ -1,0 +1,439 @@
+// Schéma de la base GD (MySQL) — voir .claude/tasks/PLAN_BACKEND.md, section 5.
+// Les valeurs d'enum sont écrites en MAJUSCULES pour Prisma, et stockées en base avec le libellé affiché (@map).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+// ─────────────────────────────────────────────────────────────
+// Listes de valeurs
+// ─────────────────────────────────────────────────────────────
+
+enum Role {
+  DIRECTION       @map("Direction")
+  ADMIN           @map("Admin")
+  CHARGE_AFFAIRES @map("Chargé d’affaires")
+  CONDUCTEUR      @map("Conducteur de travaux")
+  ADCI            @map("ADCI")
+}
+
+enum Categorie {
+  COUVERTURE          @map("Couverture")
+  PLOMBERIE           @map("Plomberie")
+  ETANCHEITE          @map("Étanchéité")
+  RAVALEMENT_PEINTURE @map("Ravalement / Peinture")
+}
+
+enum Planification {
+  A_PLANIFIER @map("À planifier")
+  PLANIFIE    @map("Planifié")
+  EN_ATTENTE  @map("En attente")
+  ANNULE      @map("Annulé")
+}
+
+enum StatutADCI {
+  NON_TRAITE            @map("Non traité")
+  EN_ATTENTE_VALIDATION @map("En attente validation")
+  VALIDE                @map("Validé")
+  ENVOYE                @map("Envoyé")
+  TRANSFERE             @map("Transféré")
+  A_VENIR               @map("À venir")
+  ANNULE                @map("Annulé")
+}
+
+enum StatutConducteur {
+  A_VERIFIER @map("À vérifier")
+  VALIDE     @map("Validé")
+}
+
+enum RelanceDevis {
+  OUI
+  NON
+  RAS
+}
+
+enum StatutChantier {
+  A_VENIR              @map("À venir")
+  EN_ATTENTE_SIGNATURE @map("En attente signature")
+  EN_COURS             @map("En cours")
+  EN_STAND_BY          @map("En stand-by")
+  TERMINE              @map("Terminé")
+  ANNULE               @map("Annulé")
+}
+
+/// Statut saisi. « En attente règlement », « Partiellement réglée », « En retard » et « Réglée » sont calculés.
+enum StatutFacture {
+  A_VALIDER @map("À valider")
+  VALIDEE   @map("Validée")
+}
+
+enum NiveauRelance {
+  R1
+  R2
+  R3
+  MD
+}
+
+enum DestinataireRelance {
+  CLIENT          @map("client")
+  CHARGE_AFFAIRES @map("chargé d’affaires")
+}
+
+enum StatutEnvoi {
+  ENVOYE @map("envoyé")
+  ECHEC  @map("échec")
+}
+
+enum TypeClient {
+  SYNDIC      @map("Syndic / Gestionnaire")
+  ARCHITECTE  @map("Architecte")
+  PARTICULIER @map("Particulier")
+  ENTREPRISE  @map("Entreprise")
+}
+
+enum TypeIntervenant {
+  INTERNE       @map("Interne")
+  SOUS_TRAITANT @map("Sous-traitant")
+}
+
+enum SourceDevis {
+  SAISIE @map("Saisie")
+  MAIL   @map("Mail")
+}
+
+enum StatutImport {
+  A_VERIFIER @map("À vérifier")
+  IMPORTE    @map("Importé")
+  IGNORE     @map("Ignoré")
+  ERREUR     @map("Erreur")
+}
+
+enum TypeJeton {
+  INVITATION
+  REINITIALISATION
+}
+
+// ─────────────────────────────────────────────────────────────
+// Utilisateurs & authentification
+// ─────────────────────────────────────────────────────────────
+
+model Utilisateur {
+  id           String   @id @default(cuid())
+  prenom       String   @db.VarChar(100)
+  nom          String   @db.VarChar(100)
+  email        String   @unique @db.VarChar(191)
+  /// Null tant que l'utilisateur n'a pas défini son mot de passe (invitation)
+  passwordHash String?  @db.VarChar(255)
+  role         Role
+  actif        Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  devisConduits    Devis[]       @relation("DevisConducteur")
+  chantiersCharges Chantier[]    @relation("ChantierChargeAffaires")
+  observations     Observation[]
+  relancesEnvoyees Relance[]
+  jetons           JetonAuth[]
+  auditLogs        AuditLog[]
+  importsTraites   ImportMail[]  @relation("ImportTraitePar")
+
+  @@map("utilisateurs")
+}
+
+/// Liens à usage unique (invitation, mot de passe oublié). Seul le hash du jeton est stocké.
+model JetonAuth {
+  id            String      @id @default(cuid())
+  utilisateurId String
+  utilisateur   Utilisateur @relation(fields: [utilisateurId], references: [id], onDelete: Cascade)
+  type          TypeJeton
+  tokenHash     String      @unique @db.VarChar(128)
+  expiresAt     DateTime
+  usedAt        DateTime?
+  createdAt     DateTime    @default(now())
+
+  @@index([utilisateurId])
+  @@map("jetons_auth")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Référentiels
+// ─────────────────────────────────────────────────────────────
+
+model Client {
+  id        String     @id @default(cuid())
+  nom       String     @unique @db.VarChar(191)
+  type      TypeClient @default(SYNDIC)
+  email     String?    @db.VarChar(191)
+  telephone String?    @db.VarChar(30)
+  actif     Boolean    @default(true)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  devis         Devis[]
+  interventions Intervention[]
+  chantiers     Chantier[]
+
+  @@map("clients")
+}
+
+model Intervenant {
+  id          String          @id @default(cuid())
+  nom         String          @unique @db.VarChar(100)
+  type        TypeIntervenant @default(INTERNE)
+  /// Liste de catégories, ex. ["Couverture","Plomberie"]
+  specialites Json
+  telephone   String?         @db.VarChar(30)
+  actif       Boolean         @default(true)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  interventions Intervention[]
+
+  @@map("intervenants")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Devis & interventions
+// ─────────────────────────────────────────────────────────────
+
+model Devis {
+  id               String            @id @default(cuid())
+  numero           String            @unique @db.VarChar(50)
+  dateReception    DateTime?         @db.Date
+  planification    Planification     @default(A_PLANIFIER)
+  categorie        Categorie
+  clientId         String
+  client           Client            @relation(fields: [clientId], references: [id])
+  adresse          String            @db.VarChar(500)
+  descriptif       String            @db.Text
+  conducteurId     String?
+  conducteur       Utilisateur?      @relation("DevisConducteur", fields: [conducteurId], references: [id], onDelete: SetNull)
+  datePassage      DateTime?         @db.Date
+  statutConducteur StatutConducteur?
+  statutADCI       StatutADCI        @default(NON_TRAITE)
+  validePar        String?           @db.VarChar(100)
+  relance          RelanceDevis?
+  commentaires     String            @db.Text
+  /// Montant HT lu sur le devis SolutionsBTP (import mail) ou saisi
+  montantHT        Decimal?          @db.Decimal(12, 2)
+  source           SourceDevis       @default(SAISIE)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  interventions Intervention[]
+  imports       ImportMail[]
+
+  @@index([statutADCI])
+  @@index([datePassage])
+  @@index([clientId])
+  @@index([conducteurId])
+  @@map("devis")
+}
+
+model Intervention {
+  id            String        @id @default(cuid())
+  numero        String        @unique @db.VarChar(50)
+  planification Planification @default(A_PLANIFIER)
+  categorie     Categorie
+  clientId      String
+  client        Client        @relation(fields: [clientId], references: [id])
+  adresse       String        @db.VarChar(500)
+  descriptif    String        @db.Text
+  technicienId  String?
+  technicien    Intervenant?  @relation(fields: [technicienId], references: [id], onDelete: SetNull)
+  datePassage   DateTime?     @db.Date
+  statutADCI    StatutADCI    @default(NON_TRAITE)
+  validePar     String?       @db.VarChar(100)
+  numeroFacture String?       @db.VarChar(50)
+  /// Lien réel vers le devis ; numeroDevis garde le numéro saisi s'il ne correspond à aucun devis connu
+  devisId       String?
+  devis         Devis?        @relation(fields: [devisId], references: [id], onDelete: SetNull)
+  numeroDevis   String?       @db.VarChar(50)
+  commentaires  String        @db.Text
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([statutADCI])
+  @@index([datePassage])
+  @@index([clientId])
+  @@index([technicienId])
+  @@index([devisId])
+  @@map("interventions")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Gros chantiers
+// ─────────────────────────────────────────────────────────────
+
+model Chantier {
+  id                  String         @id @default(cuid())
+  numero              String         @unique @db.VarChar(50)
+  /// Un chantier peut regrouper plusieurs devis, ex. ["DGD26-0506/1","DGD26-0507"]
+  devisNumeros        Json
+  adresse             String         @db.VarChar(500)
+  clientId            String
+  client              Client         @relation(fields: [clientId], references: [id])
+  categorie           Categorie
+  equipes             String         @db.VarChar(500)
+  statut              StatutChantier @default(A_VENIR)
+  chargeAffairesId    String?
+  chargeAffaires      Utilisateur?   @relation("ChantierChargeAffaires", fields: [chargeAffairesId], references: [id], onDelete: SetNull)
+  dateDebut           DateTime?      @db.Date
+  dateFin             DateTime?      @db.Date
+  montantMarcheHT     Decimal?       @db.Decimal(12, 2)
+  budgetSousTraitance Decimal?       @db.Decimal(12, 2)
+  deboursePrevu       Decimal?       @db.Decimal(12, 2)
+  debourseReel        Decimal?       @db.Decimal(12, 2)
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  observations Observation[]
+  factures     Facture[]
+
+  @@index([statut])
+  @@index([clientId])
+  @@index([chargeAffairesId])
+  @@map("chantiers")
+}
+
+/// Journal d'observations d'un chantier
+model Observation {
+  id         String       @id @default(cuid())
+  chantierId String
+  chantier   Chantier     @relation(fields: [chantierId], references: [id], onDelete: Cascade)
+  date       DateTime     @db.Date
+  texte      String       @db.Text
+  auteurId   String?
+  auteur     Utilisateur? @relation(fields: [auteurId], references: [id], onDelete: SetNull)
+  createdAt  DateTime     @default(now())
+
+  @@index([chantierId, date])
+  @@map("observations")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Facturation
+// ─────────────────────────────────────────────────────────────
+
+model Facture {
+  id                 String        @id @default(cuid())
+  numero             String        @unique @db.VarChar(50)
+  chantierId         String
+  chantier           Chantier      @relation(fields: [chantierId], references: [id])
+  /// Acompte, S1…S9, SOLDE, Travaux supplémentaires…
+  situation          String        @db.VarChar(100)
+  dateFacture        DateTime      @db.Date
+  montantTTC         Decimal       @db.Decimal(12, 2)
+  delaiPaiementJours Int           @default(15)
+  statut             StatutFacture @default(A_VALIDER)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  reglements Reglement[]
+  relances   Relance[]
+
+  @@index([chantierId])
+  @@index([dateFacture])
+  @@map("factures")
+}
+
+model Reglement {
+  id        String   @id @default(cuid())
+  factureId String
+  facture   Facture  @relation(fields: [factureId], references: [id], onDelete: Cascade)
+  date      DateTime @db.Date
+  montant   Decimal  @db.Decimal(12, 2)
+  mode      String   @db.VarChar(30)
+  createdAt DateTime @default(now())
+
+  @@index([factureId])
+  @@map("reglements")
+}
+
+model Relance {
+  id           String              @id @default(cuid())
+  factureId    String
+  facture      Facture             @relation(fields: [factureId], references: [id], onDelete: Cascade)
+  date         DateTime            @default(now())
+  niveau       NiveauRelance
+  destinataire DestinataireRelance
+  email        String              @db.VarChar(191)
+  objet        String              @db.VarChar(255)
+  corps        String              @db.Text
+  envoyeParId  String?
+  envoyePar    Utilisateur?        @relation(fields: [envoyeParId], references: [id], onDelete: SetNull)
+  statutEnvoi  StatutEnvoi
+  erreur       String?             @db.Text
+
+  @@index([factureId])
+  @@map("relances")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Technique
+// ─────────────────────────────────────────────────────────────
+
+/// Numérotation automatique par préfixe (DGD, INT, CHT, FGD) et par année
+model Compteur {
+  prefixe String @db.VarChar(10)
+  annee   Int
+  valeur  Int    @default(0)
+
+  @@id([prefixe, annee])
+  @@map("compteurs")
+}
+
+/// Historique : qui a créé / modifié / supprimé quoi
+model AuditLog {
+  id          String       @id @default(cuid())
+  date        DateTime     @default(now())
+  userId      String?
+  user        Utilisateur? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action      String       @db.VarChar(20)
+  entite      String       @db.VarChar(50)
+  entiteId    String       @db.VarChar(50)
+  changements Json?
+
+  @@index([entite, entiteId])
+  @@index([userId])
+  @@map("audit_logs")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Import des devis depuis les mails SolutionsBTP
+// ─────────────────────────────────────────────────────────────
+
+/// Un mail relevé : journal + file « À vérifier ». Un mail n'est jamais traité deux fois (messageId unique).
+model ImportMail {
+  id          String       @id @default(cuid())
+  messageId   String       @unique @db.VarChar(255)
+  recuLe      DateTime
+  expediteur  String       @db.VarChar(255)
+  objet       String       @db.VarChar(500)
+  /// Texte brut du mail (pour l'écran de vérification)
+  corps       String       @db.Text
+  statut      StatutImport @default(A_VERIFIER)
+  /// Champs extraits (numero, client, adresse, montantHT…), clés au format du front
+  donnees     Json
+  /// Raisons du passage en « À vérifier » ou de l'ignorance (ex. « Client inconnu »)
+  anomalies   Json
+  /// Nom du PDF joint, conservé dans IMPORT_MAIL_STORAGE
+  pdfNom      String?      @db.VarChar(255)
+  pdfFichier  String?      @db.VarChar(255)
+  erreur      String?      @db.Text
+  devisId     String?
+  devis       Devis?       @relation(fields: [devisId], references: [id], onDelete: SetNull)
+  traiteParId String?
+  traitePar   Utilisateur? @relation("ImportTraitePar", fields: [traiteParId], references: [id], onDelete: SetNull)
+  traiteLe    DateTime?
+  createdAt   DateTime     @default(now())
+
+  @@index([statut])
+  @@index([recuLe])
+  @@map("imports_mail")
+}

@@ -1,0 +1,5 @@
+# Paquets autorisés à exécuter leurs scripts d'installation
+allowBuilds:
+  '@prisma/engines': true
+  esbuild: true
+  prisma: true

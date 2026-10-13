@@ -1,0 +1,14 @@
+node_modules
+dist
+coverage
+*.log
+.DS_Store
+
+# Secrets locaux
+.env
+
+# Client Prisma généré (prisma generate)
+src/generated
+
+# Mails relevés et PDF des devis importés (données réelles, jamais commitées)
+data/
