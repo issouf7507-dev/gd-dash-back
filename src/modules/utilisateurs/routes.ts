@@ -2,7 +2,7 @@ import { ROLES } from '@gd/shared/types'
 import { Router } from 'express'
 import { z } from 'zod'
 import { ConflictError, ForbiddenError, NotFoundError } from '../../lib/app-error.ts'
-import { Role, roleKey } from '../../lib/labels.ts'
+import { Role, roleKey, roleLabel } from '../../lib/labels.ts'
 import { hashPassword, PASSWORD_RULE, PASSWORD_RULE_MESSAGE } from '../../lib/password.ts'
 import { isUniqueViolation } from '../../lib/prisma-errors.ts'
 import { prisma } from '../../lib/prisma.ts'
@@ -13,8 +13,16 @@ import { toUtilisateurDto } from './dto.ts'
 
 export const utilisateursRouter = Router()
 
+utilisateursRouter.use(requireAuth)
+
+/** Annuaire des collaborateurs, ouvert à tout utilisateur connecté (choix d'un conducteur, d'un chargé d'affaires…). */
+utilisateursRouter.get('/annuaire', async (_req, res) => {
+  const users = await prisma.utilisateur.findMany({ orderBy: [{ prenom: 'asc' }, { nom: 'asc' }] })
+  ok(res, users.map(({ id, prenom, nom, email, role, actif }) => ({ id, prenom, nom, email, role: roleLabel(role), actif })))
+})
+
 // Gestion des utilisateurs : réservée aux administrateurs
-utilisateursRouter.use(requireAuth, requireRole(Role.ADMIN))
+utilisateursRouter.use(requireRole(Role.ADMIN))
 
 const idParams = z.object({ id: z.string().min(1) })
 const motDePasse = z.string().regex(PASSWORD_RULE, PASSWORD_RULE_MESSAGE)

@@ -97,6 +97,15 @@ describe('/api/utilisateurs (Admin uniquement)', () => {
     expect(res.body.error.code).toBe('FORBIDDEN')
   })
 
+  it('annuaire ouvert à tout utilisateur connecté, sans données de compte', async () => {
+    expect((await request(app).get('/api/utilisateurs/annuaire')).status).toBe(401)
+    const { agent } = await loginAs('conducteur@test.local')
+    const res = await agent.get('/api/utilisateurs/annuaire')
+    expect(res.status).toBe(200)
+    expect(res.body.data).toHaveLength(4)
+    expect(Object.keys(res.body.data[0]).sort()).toEqual(['actif', 'email', 'id', 'nom', 'prenom', 'role'])
+  })
+
   it('liste les utilisateurs sans exposer les hash', async () => {
     const { agent } = await loginAs('admin@test.local')
     const res = await agent.get('/api/utilisateurs')
