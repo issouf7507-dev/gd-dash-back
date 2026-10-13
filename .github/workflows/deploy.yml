@@ -1,0 +1,173 @@
+name: Deploy API
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # bouton "Run workflow" pour redéployer à la main
+
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false # ne jamais couper un déploiement en cours
+
+# Le code partagé (@gd/shared) vit dans le dépôt du front : on clone les deux côte à côte,
+# comme en local (server/ et dgdashboard/shared/), pour que `link:../dgdashboard/shared` se résolve.
+defaults:
+  run:
+    working-directory: server
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: gd_test
+          MYSQL_USER: gd
+          MYSQL_PASSWORD: gd
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -proot" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      # vitest.config.ts remplace le nom de la base par gd_test
+      DATABASE_URL: mysql://gd:gd@127.0.0.1:3306/gd
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: server
+      - name: Récupérer @gd/shared (dépôt du front)
+        uses: actions/checkout@v4
+        with:
+          repository: issouf7507-dev/gd-dash-front
+          token: ${{ secrets.FRONT_REPO_TOKEN }}
+          path: dgdashboard
+          sparse-checkout: shared
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: server/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec prisma generate
+      - name: Migrer la base de test
+        run: pnpm exec prisma migrate deploy
+        env:
+          DATABASE_URL: mysql://gd:gd@127.0.0.1:3306/gd_test
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15 # un blocage fait échouer le job au lieu de tourner indéfiniment
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+      APP_DIR: /home/issouf/apps/gd-gest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: server
+      - name: Récupérer @gd/shared (dépôt du front)
+        uses: actions/checkout@v4
+        with:
+          repository: issouf7507-dev/gd-dash-front
+          token: ${{ secrets.FRONT_REPO_TOKEN }}
+          path: dgdashboard
+          sparse-checkout: shared
+
+      - name: Préparer la clé SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_PASSPHRASE: ${{ secrets.SSH_PASSPHRASE }} # vide si la clé n'a pas de passphrase
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          # Agent SSH : la clé y est déverrouillée une fois (passphrase via SSH_ASKPASS),
+          # les étapes suivantes l'utilisent sans rien redemander.
+          eval "$(ssh-agent -s)" > /dev/null
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          # Ne répond qu'une fois : avec une mauvaise passphrase, ssh-add redemanderait sans fin.
+          cat > ~/.ssh/askpass << 'ASKPASS'
+          #!/bin/sh
+          [ -e ~/.ssh/askpass.used ] && exit 1
+          touch ~/.ssh/askpass.used
+          printf '%s\n' "$SSH_PASSPHRASE"
+          ASKPASS
+          chmod 700 ~/.ssh/askpass
+          SSH_ASKPASS=~/.ssh/askpass SSH_ASKPASS_REQUIRE=force DISPLAY=:0 \
+            timeout 30 ssh-add ~/.ssh/deploy_key < /dev/null \
+            || { echo "::error::Clé refusée : SSH_PRIVATE_KEY mal collée ou SSH_PASSPHRASE incorrecte."; exit 1; }
+          rm -f ~/.ssh/deploy_key ~/.ssh/askpass ~/.ssh/askpass.used
+
+      - name: Enregistrer l'empreinte du VPS
+        run: |
+          if [ -z "$SSH_HOST" ]; then echo "::error::Secret SSH_HOST vide ou absent."; exit 1; fi
+          ssh-keyscan -T 15 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null \
+            && [ -s ~/.ssh/known_hosts ] \
+            || { echo "::error::VPS injoignable sur $SSH_HOST:$SSH_PORT (SSH_HOST/SSH_PORT faux, ou port SSH filtré par un pare-feu / fail2ban)."; exit 1; }
+
+      - name: Envoyer le code (API + @gd/shared)
+        working-directory: .
+        run: |
+          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "mkdir -p $APP_DIR/back $APP_DIR/dgdashboard/shared"
+          rsync -az --delete -e "ssh -p $SSH_PORT" \
+            dgdashboard/shared/ "$SSH_USER@$SSH_HOST:$APP_DIR/dgdashboard/shared/"
+          # data/ : PDF des devis importés sur le serveur, ne jamais les effacer
+          rsync -az --delete \
+            --exclude '.git' --exclude '.github' --exclude 'node_modules' \
+            --exclude 'dist' --exclude 'src/generated' --exclude '.env' --exclude 'data' \
+            -e "ssh -p $SSH_PORT" \
+            server/ "$SSH_USER@$SSH_HOST:$APP_DIR/back/"
+
+      - name: Installer, migrer, redémarrer
+        run: |
+          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" bash -s << 'EOF'
+          set -euo pipefail
+          # Session non interactive : charger Node (nvm s'il est installé, sinon le PATH système).
+          export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+          if [ -s "$NVM_DIR/nvm.sh" ]; then . "$NVM_DIR/nvm.sh"; fi
+          export PATH="$HOME/.local/share/pnpm:$HOME/.local/bin:$PATH"
+          for cmd in node pnpm pm2; do
+            command -v "$cmd" > /dev/null || { echo "::error::'$cmd' introuvable sur le VPS pour $(whoami) : installer Node 24, pnpm et PM2."; exit 1; }
+          done
+          echo "node $(node -v) | pnpm $(pnpm -v) | pm2 $(pm2 -v)"
+          # En cas d'échec (ou de timeout), afficher de quoi diagnostiquer directement dans le log du job.
+          diag() {
+            echo "::group::Diagnostic PM2"
+            timeout 20 pm2 status < /dev/null || true
+            timeout 20 pm2 logs gd-gest-api --lines 40 --nostream < /dev/null || true
+            echo "--- ~/.pm2/logs/gd-gest-api-error*.log :"; tail -n 30 ~/.pm2/logs/gd-gest-api-error*.log 2>/dev/null || true
+            echo "--- port 4500 :"; ss -tlnp 2>/dev/null | grep ':4500' || echo "personne n'écoute sur 4500"
+            echo "::endgroup::"
+          }
+          trap diag ERR
+          cd /home/issouf/apps/gd-gest/back
+          [ -f .env ] || { echo "::error::$PWD/.env absent : le créer sur le VPS avant le premier déploiement."; exit 1; }
+          pnpm install --frozen-lockfile
+          pnpm exec prisma generate
+          pnpm build                      # tsup -> dist/index.js (@gd/shared intégré au bundle)
+          pnpm exec prisma migrate deploy # applique les migrations en attente (lit .env)
+          # Lancer le démon PM2 sans le relier à la session SSH : sinon il garde la sortie ouverte
+          # et ssh attend indéfiniment la fin de la commande.
+          pm2 ping < /dev/null > /dev/null 2>&1
+          # delete + start (et pas restart) : un restart garde l'ancienne config de l'app
+          # au lieu de relire ecosystem.config.cjs. Coupure d'environ une seconde.
+          timeout 60 pm2 delete gd-gest-api < /dev/null > /dev/null 2>&1 || true
+          timeout 120 pm2 start ecosystem.config.cjs < /dev/null
+          timeout 60 pm2 save < /dev/null
+          EOF
+
+      - name: Vérifier que l'API répond
+        run: |
+          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            'for i in $(seq 1 10); do curl -fsS http://127.0.0.1:4500/api/health && exit 0; sleep 2; done; exit 1'
