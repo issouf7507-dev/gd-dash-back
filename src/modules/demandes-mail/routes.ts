@@ -11,6 +11,7 @@ import { requireAuth, requireRole } from '../../middleware/auth.ts'
 import { validate } from '../../middleware/validate.ts'
 import { toDevisDto } from '../devis/dto.ts'
 import { devisSchema, type DevisInput } from '../devis/schema.ts'
+import { mailsDuFil, regrouper, separer } from './fils.ts'
 import { creerDevisDepuisDemande, devisPropose, dossierStockage, etatReleve, relever, type DonneesDemande, type PieceStockee } from './service.ts'
 
 export const demandesDevisRouter = Router()
@@ -38,6 +39,8 @@ function toDemandeDto(d: DemandeMail) {
     traiteLe: d.traiteLe?.toISOString() ?? null,
     categorieId: d.categorieId,
     dossierId: d.dossierId,
+    // Les mails pas encore rattachés forment un fil à eux seuls
+    filId: d.filId ?? d.id,
   }
 }
 
@@ -206,9 +209,30 @@ demandesDevisRouter.post(
   },
 )
 
+// ─── Fils de discussion (regroupement automatique, corrigeable à la main) ───
+
+/** Met dans un même fil les mails choisis et tout leur fil. */
+demandesDevisRouter.post('/fils/regrouper', validate({ body: z.object({ ids: z.array(z.string().min(1)).min(2).max(500) }) }), async (_req, res) => {
+  const filId = await regrouper((res.locals.body as { ids: string[] }).ids)
+  if (!filId) throw new NotFoundError('Demandes introuvables')
+  ok(res, { filId })
+})
+
+/** Sort la demande de son fil. */
+demandesDevisRouter.post('/:id/separer', validate({ params: idParams }), async (_req, res) => {
+  const d = await trouver(res.locals.params.id)
+  await separer(d.id)
+  ok(res, toDemandeDto(await trouver(d.id)))
+})
+
 demandesDevisRouter.get('/:id', validate({ params: idParams }), async (_req, res) => {
   const d = await trouver(res.locals.params.id)
-  ok(res, { ...toDemandeDto(d), corps: d.corps })
+  const fil = await mailsDuFil(d.id, d.filId)
+  ok(res, {
+    ...toDemandeDto(d),
+    corps: d.corps,
+    fil: fil.map((m) => ({ id: m.id, recuLe: m.recuLe.toISOString(), expediteur: m.expediteur, objet: m.objet, statut: statutDemande.label(m.statut) })),
+  })
 })
 
 demandesDevisRouter.get('/:id/pieces/:index', validate({ params: idParams.extend({ index: z.coerce.number().int().min(0) }) }), async (_req, res) => {

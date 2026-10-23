@@ -2,6 +2,7 @@ import { createApp } from './app.ts'
 import { env } from './config/env.ts'
 import { logger } from './lib/logger.ts'
 import { prisma } from './lib/prisma.ts'
+import { regrouperAnciens } from './modules/demandes-mail/fils.ts'
 import { demarrerReleve as demarrerReleveDemandes } from './modules/demandes-mail/service.ts'
 import { demarrerReleve } from './modules/import-mail/service.ts'
 
@@ -12,6 +13,8 @@ const server = env.HOST ? createApp().listen(env.PORT, env.HOST, onListen) : cre
 const arreterReleve = demarrerReleve()
 // Relève des demandes de devis des clients dans la boîte contact@ (si DEMANDES_SOURCE est renseigné)
 const arreterReleveDemandes = demarrerReleveDemandes()
+// Regroupe en fils les demandes reçues avant la mise en place des fils (une seule fois)
+void regrouperAnciens().catch((err) => logger.error({ err }, 'demandes mail : regroupement des anciens mails en échec'))
 
 // Arrêt propre (PM2 reload, Ctrl+C) : on termine les requêtes en cours puis on ferme MySQL
 async function shutdown(signal: string) {

@@ -475,6 +475,11 @@ model DemandeMail {
   /// Dossier où le mail est classé (un seul, indépendant de la catégorie)
   dossierId   String?
   dossier     DossierDemande?   @relation(fields: [dossierId], references: [id], onDelete: SetNull)
+  /// Fil de discussion : les mails liés (réponse, même référence, même objet du même expéditeur) partagent la même valeur.
+  /// Null tant que le mail n'a pas été rattaché (mails antérieurs à la fonction, regroupés au démarrage)
+  filId       String?           @db.VarChar(191)
+  /// Message-ID cités par le mail (In-Reply-To, References) pour le rattacher à son fil
+  refsFil     Json?
   createdAt   DateTime          @default(now())
   updatedAt   DateTime          @updatedAt
 
@@ -482,6 +487,7 @@ model DemandeMail {
   @@index([recuLe])
   @@index([categorieId])
   @@index([dossierId])
+  @@index([filId])
   @@map("demandes_mail")
 }
 

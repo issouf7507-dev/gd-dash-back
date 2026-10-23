@@ -15,6 +15,7 @@ import { sourceDossier } from '../import-mail/sources/dossier.ts'
 import { sourceGraph } from '../import-mail/sources/graph.ts'
 import type { Progression, SourceMails } from '../import-mail/sources/types.ts'
 import { extraireDemande, rapprocherClientDemande, type ChampsDemande } from './extract.ts'
+import { rattacherAuFil } from './fils.ts'
 
 /** Contenu de la colonne `donnees` d'une demande. */
 export interface DonneesDemande {
@@ -167,10 +168,12 @@ export async function traiterMail(brut: Buffer, ref: string): Promise<ResultatTr
   const pieces: PieceStockee[] = []
   for (const p of mail.pieces) pieces.push({ nom: p.nom, type: p.type, fichier: await stockerPiece(p.contenu, p.nom) })
 
+  let id: string
   try {
-    await prisma.demandeMail.create({
+    const cree = await prisma.demandeMail.create({
       data: {
         messageId: mail.messageId,
+        refsFil: mail.refsFil,
         recuLe: mail.date,
         // Colonne VARCHAR(255) : certains en-têtes From ont un nom à rallonge
         expediteur: (mail.expediteur.nom ? `${mail.expediteur.nom} <${mail.expediteur.email}>` : mail.expediteur.email).slice(0, 255),
@@ -181,7 +184,9 @@ export async function traiterMail(brut: Buffer, ref: string): Promise<ResultatTr
         anomalies,
         pieces: pieces as unknown as Prisma.InputJsonValue,
       },
+      select: { id: true },
     })
+    id = cree.id
   } catch (err) {
     // Rien n'est enregistré : on ne garde pas les pièces jointes orphelines
     await Promise.all(pieces.map((p) => rm(path.join(dossierStockage(), p.fichier), { force: true })))
@@ -189,6 +194,8 @@ export async function traiterMail(brut: Buffer, ref: string): Promise<ResultatTr
     if (isUniqueViolation(err)) return 'déjà traitée'
     throw err
   }
+  // Le mail est enregistré : un échec du regroupement ne doit pas le faire retraiter
+  await rattacherAuFil(id).catch((err) => logger.warn({ err, id }, 'demandes mail : rattachement au fil impossible'))
   return statut === StatutDemande.IGNOREE ? 'ignorée' : 'à traiter'
 }
 

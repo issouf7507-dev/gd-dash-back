@@ -12,6 +12,8 @@ export interface PieceJointe {
 
 export interface MailDecode extends MailLu {
   messageId: string
+  /** Message-ID cités (In-Reply-To puis References) : le mail répond à / transfère ces mails */
+  refsFil: string[]
   pdfs: PieceJointe[]
   /** PDF et photos joints (les images intégrées au corps, comme les logos de signature, sont écartées) */
   pieces: PieceJointe[]
@@ -45,6 +47,8 @@ export async function decoderMail(brut: Buffer, idSecours: string): Promise<Mail
   const [expediteur] = adresses(m.from)
   return {
     messageId: m.messageId ?? idSecours,
+    // Les plus récents d'abord ; on en garde 20 (les longs fils citent tout l'historique)
+    refsFil: [...new Set([m.inReplyTo, ...[m.references ?? []].flat().reverse()].filter((r): r is string => !!r))].slice(0, 20),
     objet: m.subject ?? '',
     corps: m.text ?? '',
     textePdf: textes.join('\n'),

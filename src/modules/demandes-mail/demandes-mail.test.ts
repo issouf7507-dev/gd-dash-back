@@ -12,6 +12,7 @@ import { prisma } from '../../lib/prisma.ts'
 import { eml } from '../import-mail/exemples.ts'
 import { sourceDossier } from '../import-mail/sources/dossier.ts'
 import { extraireDemande, rapprocherClientDemande } from './extract.ts'
+import { objetNormalise, regrouperAnciens } from './fils.ts'
 import { relever } from './service.ts'
 
 if (!process.env.DATABASE_URL?.includes('/gd_test')) throw new Error('Les tests doivent tourner sur la base gd_test')
@@ -309,5 +310,51 @@ describe('relève et traitement', () => {
     await adci.delete(`${dossiers}/${foncia.id}`).expect(200)
     expect((await adci.get(dossiers).expect(200)).body.data.dossiers.map((d: { nom: string }) => d.nom).sort()).toEqual(['Archives', 'Urgent'])
     for (const id of ids) expect((await adci.get(`/api/demandes-devis/${id}`).expect(200)).body.data.dossierId).toBeNull()
+  })
+
+  it('regroupe en fils les réponses, les relances au même objet et les mails de même référence', async () => {
+    const osMemeRef = await prisma.demandeMail.findMany({ where: { donnees: { path: '$.champs.reference', equals: 'OSMIL100000001' } }, select: { filId: true } })
+    expect(osMemeRef).toHaveLength(2)
+    expect(osMemeRef[0].filId).toBe(osMemeRef[1].filId)
+
+    const de = 'Agence Atrium <agence@atrium-test.fr>'
+    const a = 'contact@gd.fr'
+    const texte = 'Bonjour, merci de nous faire parvenir un devis pour la fuite en toiture. Cordialement'
+    const dossier = await mkdtemp(path.join(os.tmpdir(), 'gd-fils-'))
+    // La réponse est relevée avant le mail d'origine : le rattachement marche dans les deux sens
+    await writeFile(path.join(dossier, '1-reponse.eml'), eml({ messageId: 'fil-2@atrium-test.fr', enReponseA: 'fil-1@atrium-test.fr', date: new Date('2026-10-02T10:00:00Z'), de, a, objet: 'Photos complémentaires', texte }))
+    await writeFile(path.join(dossier, '2-origine.eml'), eml({ messageId: 'fil-1@atrium-test.fr', date: new Date('2026-10-01T10:00:00Z'), de, a, objet: 'Demande de devis fuite toiture 12 rue des Lilas', texte }))
+    await writeFile(path.join(dossier, '3-relance.eml'), eml({ messageId: 'fil-3@atrium-test.fr', date: new Date('2026-10-05T10:00:00Z'), de, a, objet: 'TR: RE: Demande de devis fuite  toiture 12 rue des Lilas', texte }))
+    await writeFile(path.join(dossier, '4-autre.eml'), eml({ messageId: 'fil-4@atrium-test.fr', date: new Date('2026-10-06T10:00:00Z'), de, a, objet: 'Demande de devis ravalement 3 rue Haute', texte }))
+    await relever(sourceDossier(dossier))
+
+    const mail = (n: number) => prisma.demandeMail.findUniqueOrThrow({ where: { messageId: `<fil-${n}@atrium-test.fr>` } })
+    const [m1, m2, m3, m4] = await Promise.all([1, 2, 3, 4].map(mail))
+    expect([m2.filId, m3.filId]).toEqual([m1.id, m1.id])
+    expect(m4.filId).toBe(m4.id)
+    const detail = (await adci.get(`/api/demandes-devis/${m3.id}`).expect(200)).body.data
+    expect(detail.filId).toBe(m1.id)
+    expect(detail.fil.map((m: { id: string }) => m.id)).toEqual([m1.id, m2.id, m3.id])
+
+    // Correction à la main : sortir le premier mail du fil, puis regrouper deux fils
+    await adci.post(`/api/demandes-devis/${m1.id}/separer`).expect(200)
+    expect((await mail(1)).filId).toBe(m1.id)
+    expect([(await mail(2)).filId, (await mail(3)).filId]).toEqual([m2.id, m2.id])
+    await adci.post('/api/demandes-devis/fils/regrouper').send({ ids: [m4.id] }).expect(400)
+    expect((await adci.post('/api/demandes-devis/fils/regrouper').send({ ids: [m1.id, m4.id] }).expect(200)).body.data.filId).toBe(m1.id)
+    expect((await mail(4)).filId).toBe(m1.id)
+
+    // Mails reçus avant la mise en place des fils : regroupés au démarrage
+    await prisma.demandeMail.updateMany({ data: { filId: null } })
+    await regrouperAnciens()
+    const apres = await Promise.all([1, 2, 3, 4].map(mail))
+    expect(apres.map((m) => m.filId)).toEqual([m1.id, m1.id, m1.id, m4.id])
+  })
+})
+
+describe('objet normalisé', () => {
+  it('retire les préfixes de réponse et de transfert, la casse et les accents', () => {
+    expect(objetNormalise('TR: RE:Re : [EXT] Fwd: Dégât  des eaux')).toBe('degat des eaux')
+    expect(objetNormalise('RE[2]: Devis')).toBe('devis')
   })
 })
