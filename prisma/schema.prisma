@@ -106,6 +106,13 @@ enum SourceDevis {
   MAIL   @map("Mail")
 }
 
+enum StatutDemande {
+  A_TRAITER  @map("À traiter")
+  DEVIS_CREE @map("Devis créé")
+  IGNOREE    @map("Ignorée")
+  ERREUR     @map("Erreur")
+}
+
 enum StatutImport {
   A_VERIFIER @map("À vérifier")
   IMPORTE    @map("Importé")
@@ -141,6 +148,7 @@ model Utilisateur {
   jetons           JetonAuth[]
   auditLogs        AuditLog[]
   importsTraites   ImportMail[]  @relation("ImportTraitePar")
+  demandesTraitees DemandeMail[] @relation("DemandeTraiteePar")
 
   @@map("utilisateurs")
 }
@@ -227,6 +235,7 @@ model Devis {
 
   interventions Intervention[]
   imports       ImportMail[]
+  demandes      DemandeMail[]
 
   @@index([statutADCI])
   @@index([datePassage])
@@ -436,4 +445,34 @@ model ImportMail {
   @@index([statut])
   @@index([recuLe])
   @@map("imports_mail")
+}
+
+/// Demande de devis d'un client (ordre de service, demande PDF…) relevée dans la boîte contact@ (Outlook)
+model DemandeMail {
+  id          String        @id @default(cuid())
+  messageId   String        @unique @db.VarChar(255)
+  recuLe      DateTime
+  expediteur  String        @db.VarChar(255)
+  objet       String        @db.VarChar(500)
+  /// Texte brut du mail (pour l'écran de traitement)
+  corps       String        @db.Text
+  statut      StatutDemande @default(A_TRAITER)
+  /// Champs extraits (référence client, adresse, accès, contacts…), clés au format du front
+  donnees     Json
+  /// Points à vérifier, ou motif quand la demande est ignorée
+  anomalies   Json
+  /// Pièces jointes conservées dans DEMANDES_STOCKAGE : [{ nom, fichier, type }]
+  pieces      Json
+  erreur      String?       @db.Text
+  devisId     String?
+  devis       Devis?        @relation(fields: [devisId], references: [id], onDelete: SetNull)
+  traiteParId String?
+  traitePar   Utilisateur?  @relation("DemandeTraiteePar", fields: [traiteParId], references: [id], onDelete: SetNull)
+  traiteLe    DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([statut])
+  @@index([recuLe])
+  @@map("demandes_mail")
 }

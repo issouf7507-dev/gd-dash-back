@@ -24,6 +24,7 @@ import {
   StatutChantier,
   StatutConducteur,
   StatutFacture,
+  StatutDemande,
   StatutImport,
   TypeClient,
   TypeIntervenant,
@@ -78,6 +79,12 @@ export const statutImport = mapping<StatutImport, 'À vérifier' | 'Importé' | 
   A_VERIFIER: 'À vérifier',
   IMPORTE: 'Importé',
   IGNORE: 'Ignoré',
+  ERREUR: 'Erreur',
+})
+export const statutDemande = mapping<StatutDemande, 'À traiter' | 'Devis créé' | 'Ignorée' | 'Erreur'>({
+  A_TRAITER: 'À traiter',
+  DEVIS_CREE: 'Devis créé',
+  IGNOREE: 'Ignorée',
   ERREUR: 'Erreur',
 })
 export const typeClient = mapping<TypeClient, TypeClientLabel>({

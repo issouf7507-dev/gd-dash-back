@@ -31,6 +31,23 @@ const schema = z.object({
   IMAP_LIBELLE: z.string().default('GD-Devis'),
   /** Nombre de jours relus à chaque relève (les mails déjà traités sont reconnus et sautés) */
   IMAP_JOURS: z.coerce.number().int().min(1).default(30),
+
+  // Demandes de devis des clients relevées dans la boîte contact@ (Outlook / Microsoft 365)
+  /** off : désactivé · dossier : lit des fichiers .eml (développement) · graph : lit la boîte Outlook via Microsoft Graph */
+  DEMANDES_SOURCE: z.enum(['off', 'dossier', 'graph']).default('off'),
+  DEMANDES_DOSSIER: z.string().default('data/demandes-entrantes'),
+  /** Dossier où sont conservées les pièces jointes des demandes */
+  DEMANDES_STOCKAGE: z.string().default('data/demandes'),
+  DEMANDES_INTERVALLE_MIN: z.coerce.number().min(1).default(5),
+  /** Nombre de jours relus à chaque relève (les mails déjà traités sont reconnus et sautés) */
+  DEMANDES_JOURS: z.coerce.number().int().min(1).default(14),
+  /** Application Microsoft Entra autorisée à lire la boîte (permission Mail.Read de type « Application ») */
+  GRAPH_TENANT_ID: z.string().default(''),
+  GRAPH_CLIENT_ID: z.string().default(''),
+  GRAPH_CLIENT_SECRET: z.string().default(''),
+  GRAPH_BOITE: z.string().default('contact@gdcouverture.fr'),
+  /** Dossier Outlook relevé (inbox = Boîte de réception) */
+  GRAPH_DOSSIER: z.string().default('inbox'),
 })
 
 const parsed = schema.safeParse(process.env)
@@ -41,6 +58,11 @@ if (!parsed.success) {
 
 if (parsed.data.IMPORT_MAIL_SOURCE === 'imap' && (!parsed.data.IMAP_USER || !parsed.data.IMAP_PASSWORD)) {
   console.error('❌ IMPORT_MAIL_SOURCE=imap : renseignez IMAP_USER et IMAP_PASSWORD dans server/.env')
+  process.exit(1)
+}
+
+if (parsed.data.DEMANDES_SOURCE === 'graph' && (!parsed.data.GRAPH_TENANT_ID || !parsed.data.GRAPH_CLIENT_ID || !parsed.data.GRAPH_CLIENT_SECRET)) {
+  console.error('❌ DEMANDES_SOURCE=graph : renseignez GRAPH_TENANT_ID, GRAPH_CLIENT_ID et GRAPH_CLIENT_SECRET dans server/.env')
   process.exit(1)
 }
 

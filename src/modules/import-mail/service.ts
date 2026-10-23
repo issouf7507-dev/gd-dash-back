@@ -181,7 +181,7 @@ export async function traiterMail(brut: Buffer, ref: string): Promise<ResultatTr
     data: {
       messageId: mail.messageId,
       recuLe: mail.date,
-      expediteur: mail.expediteur.nom ? `${mail.expediteur.nom} <${mail.expediteur.email}>` : mail.expediteur.email,
+      expediteur: (mail.expediteur.nom ? `${mail.expediteur.nom} <${mail.expediteur.email}>` : mail.expediteur.email).slice(0, 255),
       objet: mail.objet.slice(0, 500),
       corps: mail.corps.slice(0, 20_000),
       statut,
