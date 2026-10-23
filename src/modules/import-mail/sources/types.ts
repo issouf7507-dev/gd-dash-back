@@ -15,8 +15,11 @@ export interface Progression {
 
 export interface SourceMails {
   nom: string
-  /** Mails à traiter. `dejaTraite` permet à la source de ne pas télécharger les mails connus. */
-  lire(dejaTraite: (messageId: string) => Promise<boolean>, progression?: (p: Progression) => void): Promise<MailBrut[]>
+  /**
+   * Mails à traiter. `dejaTraite` permet à la source de ne pas télécharger les mails connus.
+   * Une source distante les fournit un par un (AsyncIterable) : ils ne sont jamais tous en mémoire à la fois.
+   */
+  lire(dejaTraite: (messageId: string) => Promise<boolean>, progression?: (p: Progression) => void): Promise<MailBrut[]> | AsyncIterable<MailBrut>
   /** Appelé après traitement (ex. déplacer le fichier). Ne supprime jamais un mail. */
   marquerTraite?(ref: string): Promise<void>
 }

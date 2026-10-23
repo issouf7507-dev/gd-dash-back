@@ -51,7 +51,7 @@ export function sourceGraph(cfg: GraphConfig): SourceMails {
   const boite = `${GRAPH}/users/${encodeURIComponent(cfg.boite)}`
   return {
     nom: `outlook ${cfg.boite}`,
-    async lire(dejaTraite, progression) {
+    async *lire(dejaTraite, progression) {
       const depuis = new Date(Date.now() - cfg.jours * 86_400_000).toISOString()
       const params = new URLSearchParams({
         $filter: `receivedDateTime ge ${depuis}`,
@@ -71,14 +71,13 @@ export function sourceGraph(cfg: GraphConfig): SourceMails {
         progression?.({ etape: 'recherche', faits: aTelecharger.length, total: null })
         url = page['@odata.nextLink']
       }
-      // 2. Source MIME complète (.eml) : décodée comme les autres sources
-      const mails: MailBrut[] = []
-      for (const id of aTelecharger) {
-        progression?.({ etape: 'téléchargement', faits: mails.length, total: aTelecharger.length })
+      // 2. Source MIME complète (.eml), fournie mail par mail : chacun est traité et enregistré avant le
+      // téléchargement du suivant (tout garder en mémoire dépassait la limite PM2, qui redémarrait l'API en boucle)
+      for (const [i, id] of aTelecharger.entries()) {
+        progression?.({ etape: 'téléchargement', faits: i, total: aTelecharger.length })
         const brut = Buffer.from(await (await get(`${boite}/messages/${encodeURIComponent(id)}/$value`)).arrayBuffer())
-        mails.push({ ref: id, brut })
+        yield { ref: id, brut } satisfies MailBrut
       }
-      return mails
     },
   }
 }
