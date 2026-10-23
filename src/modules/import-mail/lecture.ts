@@ -6,11 +6,15 @@ import type { MailLu } from './extract.ts'
 export interface PieceJointe {
   nom: string
   contenu: Buffer
+  /** Type MIME (application/pdf, image/jpeg…) */
+  type: string
 }
 
 export interface MailDecode extends MailLu {
   messageId: string
   pdfs: PieceJointe[]
+  /** PDF et photos joints (les images intégrées au corps, comme les logos de signature, sont écartées) */
+  pieces: PieceJointe[]
 }
 
 const adresses = (a: AddressObject | AddressObject[] | undefined) =>
@@ -27,7 +31,10 @@ export async function decoderMail(brut: Buffer, idSecours: string): Promise<Mail
   const m = await simpleParser(brut)
   const pdfs = m.attachments
     .filter((a) => a.contentType === 'application/pdf' || /\.pdf$/i.test(a.filename ?? ''))
-    .map((a) => ({ nom: a.filename ?? 'devis.pdf', contenu: a.content }))
+    .map((a) => ({ nom: a.filename ?? 'devis.pdf', contenu: a.content, type: 'application/pdf' }))
+  const photos = m.attachments
+    .filter((a) => a.contentType.startsWith('image/') && !a.related && a.contentDisposition === 'attachment')
+    .map((a, i) => ({ nom: a.filename ?? `photo-${i + 1}.${a.contentType.split('/')[1]}`, contenu: a.content, type: a.contentType }))
 
   const textes: string[] = []
   for (const p of pdfs) {
@@ -45,5 +52,6 @@ export async function decoderMail(brut: Buffer, idSecours: string): Promise<Mail
     destinataires: [...adresses(m.to), ...adresses(m.cc)],
     date: m.date ?? new Date(),
     pdfs,
+    pieces: [...pdfs, ...photos],
   }
 }

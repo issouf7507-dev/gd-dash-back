@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { authRouter } from './modules/auth/routes.ts'
 import { chantiersRouter, observationsRouter } from './modules/chantiers/routes.ts'
 import { clientsRouter } from './modules/clients/routes.ts'
+import { demandesDevisRouter } from './modules/demandes-mail/routes.ts'
 import { devisRouter } from './modules/devis/routes.ts'
 import { facturesRouter, reglementsRouter } from './modules/factures/routes.ts'
 import { importsDevisRouter } from './modules/import-mail/routes.ts'
@@ -19,6 +20,7 @@ apiRouter.use('/utilisateurs', utilisateursRouter)
 apiRouter.use('/clients', clientsRouter)
 apiRouter.use('/devis', devisRouter)
 apiRouter.use('/imports-devis', importsDevisRouter)
+apiRouter.use('/demandes-devis', demandesDevisRouter)
 apiRouter.use('/intervenants', intervenantsRouter)
 apiRouter.use('/interventions', interventionsRouter)
 apiRouter.use('/chantiers', chantiersRouter)
