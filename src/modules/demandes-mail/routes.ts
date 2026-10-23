@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import path from 'node:path'
 import { z } from 'zod'
-import { StatutDemande, type DemandeMail } from '../../generated/prisma/client.ts'
+import { StatutDemande, type CategorieDemande, type DemandeMail } from '../../generated/prisma/client.ts'
 import { ConflictError, NotFoundError } from '../../lib/app-error.ts'
 import { Role, statutDemande } from '../../lib/labels.ts'
 import { isUniqueViolation } from '../../lib/prisma-errors.ts'
@@ -36,6 +36,7 @@ function toDemandeDto(d: DemandeMail) {
     erreur: d.erreur,
     devisId: d.devisId,
     traiteLe: d.traiteLe?.toISOString() ?? null,
+    categorieId: d.categorieId,
   }
 }
 
@@ -62,6 +63,55 @@ demandesDevisRouter.post('/relever', async (_req, res) => {
   void relever()
   ok(res, { ...etatReleve(), aTraiter: await aTraiter() })
 })
+
+// ─── Catégories (rangement manuel, une catégorie par demande) ───
+
+const COULEURS = ['gray', 'red', 'amber', 'green', 'blue', 'violet', 'orange', 'sky'] as const
+const categorieSchema = z.object({ nom: z.string().trim().min(1, 'Indiquez un nom').max(60), couleur: z.enum(COULEURS) })
+
+const toCategorieDto = (c: CategorieDemande) => ({ id: c.id, nom: c.nom, couleur: c.couleur })
+const nomPris = (err: unknown): never => {
+  if (isUniqueViolation(err)) throw new ConflictError('Une catégorie porte déjà ce nom')
+  throw err
+}
+
+demandesDevisRouter.get('/categories', async (_req, res) => {
+  const categories = await prisma.categorieDemande.findMany({ orderBy: { nom: 'asc' } })
+  ok(res, categories.map(toCategorieDto))
+})
+
+demandesDevisRouter.post('/categories', validate({ body: categorieSchema }), async (_req, res) => {
+  const c = await prisma.categorieDemande.create({ data: res.locals.body }).catch(nomPris)
+  ok(res, toCategorieDto(c), { status: 201 })
+})
+
+demandesDevisRouter.patch('/categories/:id', validate({ params: idParams, body: categorieSchema.partial() }), async (_req, res) => {
+  const id = res.locals.params.id as string
+  if (!(await prisma.categorieDemande.findUnique({ where: { id }, select: { id: true } }))) throw new NotFoundError('Catégorie introuvable')
+  const c = await prisma.categorieDemande.update({ where: { id }, data: res.locals.body }).catch(nomPris)
+  ok(res, toCategorieDto(c))
+})
+
+/** Les demandes de la catégorie ne sont pas supprimées : elles redeviennent « sans catégorie ». */
+demandesDevisRouter.delete('/categories/:id', validate({ params: idParams }), async (_req, res) => {
+  const id = res.locals.params.id as string
+  if (!(await prisma.categorieDemande.findUnique({ where: { id }, select: { id: true } }))) throw new NotFoundError('Catégorie introuvable')
+  await prisma.categorieDemande.delete({ where: { id } })
+  ok(res, { id })
+})
+
+/** Range une ou plusieurs demandes dans une catégorie (null : les sort de leur catégorie). */
+demandesDevisRouter.post(
+  '/ranger',
+  validate({ body: z.object({ ids: z.array(z.string().min(1)).min(1).max(500), categorieId: z.string().min(1).nullable() }) }),
+  async (_req, res) => {
+    const { ids, categorieId } = res.locals.body as { ids: string[]; categorieId: string | null }
+    if (categorieId && !(await prisma.categorieDemande.findUnique({ where: { id: categorieId }, select: { id: true } })))
+      throw new NotFoundError('Catégorie introuvable')
+    const { count } = await prisma.demandeMail.updateMany({ where: { id: { in: ids } }, data: { categorieId } })
+    ok(res, { count })
+  },
+)
 
 demandesDevisRouter.get('/:id', validate({ params: idParams }), async (_req, res) => {
   const d = await trouver(res.locals.params.id)

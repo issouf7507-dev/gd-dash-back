@@ -196,6 +196,7 @@ let adci: ReturnType<typeof request.agent>
 describe('relève et traitement', () => {
   beforeAll(async () => {
     await prisma.demandeMail.deleteMany()
+    await prisma.categorieDemande.deleteMany()
     await prisma.importMail.deleteMany()
     await prisma.intervention.deleteMany()
     await prisma.devis.deleteMany()
@@ -253,5 +254,21 @@ describe('relève et traitement', () => {
     const d = await prisma.demandeMail.findFirstOrThrow({ where: { objet: 'Nos promotions du mois' } })
     expect((await adci.post(`/api/demandes-devis/${d.id}/reprendre`).expect(200)).body.data.statut).toBe('À traiter')
     expect((await adci.post(`/api/demandes-devis/${d.id}/ignorer`).expect(200)).body.data.statut).toBe('Ignorée')
+  })
+
+  it('range les demandes dans une catégorie, puis les libère quand la catégorie est supprimée', async () => {
+    const cat = (await adci.post('/api/demandes-devis/categories').send({ nom: 'Foncia', couleur: 'blue' }).expect(201)).body.data
+    await adci.post('/api/demandes-devis/categories').send({ nom: 'Foncia', couleur: 'red' }).expect(409)
+    await adci.post('/api/demandes-devis/categories').send({ nom: 'Autre', couleur: 'rose' }).expect(400)
+    await adci.patch(`/api/demandes-devis/categories/${cat.id}`).send({ nom: 'Foncia Seine Ouest' }).expect(200)
+
+    const ids = (await prisma.demandeMail.findMany({ take: 2, select: { id: true } })).map((d) => d.id)
+    await adci.post('/api/demandes-devis/ranger').send({ ids, categorieId: 'inconnue' }).expect(404)
+    expect((await adci.post('/api/demandes-devis/ranger').send({ ids, categorieId: cat.id }).expect(200)).body.data.count).toBe(2)
+    expect((await adci.get(`/api/demandes-devis/${ids[0]}`).expect(200)).body.data.categorieId).toBe(cat.id)
+
+    await adci.delete(`/api/demandes-devis/categories/${cat.id}`).expect(200)
+    expect((await adci.get('/api/demandes-devis/categories').expect(200)).body.data).toEqual([])
+    expect((await adci.get(`/api/demandes-devis/${ids[0]}`).expect(200)).body.data.categorieId).toBeNull()
   })
 })
