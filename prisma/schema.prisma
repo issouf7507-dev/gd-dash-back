@@ -472,12 +472,16 @@ model DemandeMail {
   /// Rangement choisi par l'utilisateur (une seule catégorie par mail)
   categorieId String?
   categorie   CategorieDemande? @relation(fields: [categorieId], references: [id], onDelete: SetNull)
+  /// Dossier où le mail est classé (un seul, indépendant de la catégorie)
+  dossierId   String?
+  dossier     DossierDemande?   @relation(fields: [dossierId], references: [id], onDelete: SetNull)
   createdAt   DateTime          @default(now())
   updatedAt   DateTime          @updatedAt
 
   @@index([statut])
   @@index([recuLe])
   @@index([categorieId])
+  @@index([dossierId])
   @@map("demandes_mail")
 }
 
@@ -492,4 +496,21 @@ model CategorieDemande {
   updatedAt DateTime      @updatedAt
 
   @@map("categories_demande")
+}
+
+/// Dossiers (et sous-dossiers) créés par les utilisateurs pour classer les demandes reçues par mail
+model DossierDemande {
+  id        String           @id @default(cuid())
+  /// Unique parmi les dossiers de même parent (vérifié par l'API : MySQL laisse passer les doublons quand parentId est null)
+  nom       String           @db.VarChar(60)
+  parentId  String?
+  /// Supprimer un dossier supprime ses sous-dossiers ; leurs mails redeviennent « sans dossier »
+  parent    DossierDemande?  @relation("SousDossiers", fields: [parentId], references: [id], onDelete: Cascade)
+  enfants   DossierDemande[] @relation("SousDossiers")
+  demandes  DemandeMail[]
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  @@index([parentId])
+  @@map("dossiers_demande")
 }

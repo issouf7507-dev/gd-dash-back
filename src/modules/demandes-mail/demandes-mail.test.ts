@@ -197,6 +197,7 @@ describe('relève et traitement', () => {
   beforeAll(async () => {
     await prisma.demandeMail.deleteMany()
     await prisma.categorieDemande.deleteMany()
+    await prisma.dossierDemande.deleteMany()
     await prisma.importMail.deleteMany()
     await prisma.intervention.deleteMany()
     await prisma.devis.deleteMany()
@@ -270,5 +271,43 @@ describe('relève et traitement', () => {
     await adci.delete(`/api/demandes-devis/categories/${cat.id}`).expect(200)
     expect((await adci.get('/api/demandes-devis/categories').expect(200)).body.data).toEqual([])
     expect((await adci.get(`/api/demandes-devis/${ids[0]}`).expect(200)).body.data.categorieId).toBeNull()
+  })
+
+  it('classe les demandes dans des dossiers et sous-dossiers', async () => {
+    const dossiers = '/api/demandes-devis/dossiers'
+    const foncia = (await adci.post(dossiers).send({ nom: 'Foncia' }).expect(201)).body.data
+    const urgent = (await adci.post(dossiers).send({ nom: 'Urgent', parentId: foncia.id }).expect(201)).body.data
+    const archives = (await adci.post(dossiers).send({ nom: 'Archives' }).expect(201)).body.data
+    await adci.post(dossiers).send({ nom: 'Foncia' }).expect(409)
+    await adci.post(dossiers).send({ nom: 'Urgent', parentId: archives.id }).expect(201)
+    await adci.post(dossiers).send({ nom: 'X', parentId: 'inconnu' }).expect(404)
+
+    // Pas de boucle : un dossier ne va pas dans son propre sous-dossier
+    await adci.patch(`${dossiers}/${foncia.id}`).send({ parentId: urgent.id }).expect(409)
+    await adci.patch(`${dossiers}/${foncia.id}`).send({ parentId: foncia.id }).expect(409)
+
+    const ids = (await prisma.demandeMail.findMany({ take: 2, orderBy: { recuLe: 'desc' }, select: { id: true } })).map((d) => d.id)
+    await adci.post('/api/demandes-devis/classer').send({ ids: [ids[0]], dossierId: foncia.id }).expect(200)
+    await adci.post('/api/demandes-devis/classer').send({ ids: [ids[1]], dossierId: urgent.id }).expect(200)
+    await adci.post('/api/demandes-devis/classer').send({ ids, dossierId: 'inconnu' }).expect(404)
+
+    // Un dossier montre aussi les mails de ses sous-dossiers
+    const liste = async (dossier: string) => (await adci.get(`/api/demandes-devis?dossier=${dossier}`).expect(200)).body.data.map((d: { id: string }) => d.id)
+    expect(await liste(foncia.id)).toEqual(ids)
+    expect(await liste(urgent.id)).toEqual([ids[1]])
+    expect(await liste('aucun')).not.toContain(ids[0])
+
+    const arbre = (await adci.get(dossiers).expect(200)).body.data
+    expect(arbre.dossiers.find((d: { id: string }) => d.id === foncia.id)).toMatchObject({ mails: 1, parentId: null })
+    expect(arbre.dossiers.find((d: { id: string }) => d.id === urgent.id)).toMatchObject({ mails: 1, parentId: foncia.id })
+    expect(arbre.tous.mails).toBe(arbre.sansDossier.mails + 2)
+
+    // Déplacer « Urgent » à la racine puis supprimer « Foncia » avec ses sous-dossiers
+    await adci.patch(`${dossiers}/${urgent.id}`).send({ parentId: archives.id }).expect(409)
+    await adci.patch(`${dossiers}/${urgent.id}`).send({ nom: 'Très urgent', parentId: archives.id }).expect(200)
+    await adci.patch(`${dossiers}/${urgent.id}`).send({ parentId: foncia.id }).expect(200)
+    await adci.delete(`${dossiers}/${foncia.id}`).expect(200)
+    expect((await adci.get(dossiers).expect(200)).body.data.dossiers.map((d: { nom: string }) => d.nom).sort()).toEqual(['Archives', 'Urgent'])
+    for (const id of ids) expect((await adci.get(`/api/demandes-devis/${id}`).expect(200)).body.data.dossierId).toBeNull()
   })
 })
