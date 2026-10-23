@@ -449,30 +449,74 @@ model ImportMail {
 
 /// Demande de devis d'un client (ordre de service, demande PDF…) relevée dans la boîte contact@ (Outlook)
 model DemandeMail {
-  id          String        @id @default(cuid())
-  messageId   String        @unique @db.VarChar(255)
+  id          String            @id @default(cuid())
+  messageId   String            @unique @db.VarChar(255)
   recuLe      DateTime
-  expediteur  String        @db.VarChar(255)
-  objet       String        @db.VarChar(500)
+  expediteur  String            @db.VarChar(255)
+  objet       String            @db.VarChar(500)
   /// Texte brut du mail (pour l'écran de traitement)
-  corps       String        @db.Text
-  statut      StatutDemande @default(A_TRAITER)
+  corps       String            @db.Text
+  statut      StatutDemande     @default(A_TRAITER)
   /// Champs extraits (référence client, adresse, accès, contacts…), clés au format du front
   donnees     Json
   /// Points à vérifier, ou motif quand la demande est ignorée
   anomalies   Json
   /// Pièces jointes conservées dans DEMANDES_STOCKAGE : [{ nom, fichier, type }]
   pieces      Json
-  erreur      String?       @db.Text
+  erreur      String?           @db.Text
   devisId     String?
-  devis       Devis?        @relation(fields: [devisId], references: [id], onDelete: SetNull)
+  devis       Devis?            @relation(fields: [devisId], references: [id], onDelete: SetNull)
   traiteParId String?
-  traitePar   Utilisateur?  @relation("DemandeTraiteePar", fields: [traiteParId], references: [id], onDelete: SetNull)
+  traitePar   Utilisateur?      @relation("DemandeTraiteePar", fields: [traiteParId], references: [id], onDelete: SetNull)
   traiteLe    DateTime?
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  /// Rangement choisi par l'utilisateur (une seule catégorie par mail)
+  categorieId String?
+  categorie   CategorieDemande? @relation(fields: [categorieId], references: [id], onDelete: SetNull)
+  /// Dossier où le mail est classé (un seul, indépendant de la catégorie)
+  dossierId   String?
+  dossier     DossierDemande?   @relation(fields: [dossierId], references: [id], onDelete: SetNull)
+  /// Fil de discussion : les mails liés (réponse, même référence, même objet du même expéditeur) partagent la même valeur.
+  /// Null tant que le mail n'a pas été rattaché (mails antérieurs à la fonction, regroupés au démarrage)
+  filId       String?           @db.VarChar(191)
+  /// Message-ID cités par le mail (In-Reply-To, References) pour le rattacher à son fil
+  refsFil     Json?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
 
   @@index([statut])
   @@index([recuLe])
+  @@index([categorieId])
+  @@index([dossierId])
+  @@index([filId])
   @@map("demandes_mail")
+}
+
+/// Catégories créées par les utilisateurs pour ranger les demandes reçues par mail
+model CategorieDemande {
+  id        String        @id @default(cuid())
+  nom       String        @unique @db.VarChar(60)
+  /// Teinte de la pastille (gray, red, amber, green, blue, violet, orange, sky)
+  couleur   String        @db.VarChar(20)
+  demandes  DemandeMail[]
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@map("categories_demande")
+}
+
+/// Dossiers (et sous-dossiers) créés par les utilisateurs pour classer les demandes reçues par mail
+model DossierDemande {
+  id        String           @id @default(cuid())
+  /// Unique parmi les dossiers de même parent (vérifié par l'API : MySQL laisse passer les doublons quand parentId est null)
+  nom       String           @db.VarChar(60)
+  parentId  String?
+  /// Supprimer un dossier supprime ses sous-dossiers ; leurs mails redeviennent « sans dossier »
+  parent    DossierDemande?  @relation("SousDossiers", fields: [parentId], references: [id], onDelete: Cascade)
+  enfants   DossierDemande[] @relation("SousDossiers")
+  demandes  DemandeMail[]
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  @@index([parentId])
+  @@map("dossiers_demande")
 }
