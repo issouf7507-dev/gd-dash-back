@@ -247,7 +247,7 @@ export function relever(source = sourceConfiguree()): Promise<EtatReleve> {
     const compte: Partial<Record<ResultatTraitement, number>> = {}
     try {
       const dejaTraite = async (messageId: string) => !!(await prisma.importMail.findUnique({ where: { messageId }, select: { id: true } }))
-      for (const m of await source.lire(dejaTraite)) {
+      for await (const m of await source.lire(dejaTraite)) {
         const r = await traiterMail(m.brut, m.ref)
         compte[r] = (compte[r] ?? 0) + 1
         await source.marquerTraite?.(m.ref)

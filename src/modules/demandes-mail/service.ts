@@ -218,8 +218,10 @@ export function relever(source = sourceConfiguree()): Promise<EtatReleve> {
     try {
       const dejaTraite = async (messageId: string) => !!(await prisma.demandeMail.findUnique({ where: { messageId }, select: { id: true } }))
       const mails = await source.lire(dejaTraite, (p) => (etat.progression = p))
-      for (const [i, m] of mails.entries()) {
-        etat.progression = { etape: 'traitement', faits: i, total: mails.length }
+      let i = 0
+      for await (const m of mails) {
+        // Une source qui fournit les mails un par un suit elle-même l'avancement (téléchargement)
+        if (Array.isArray(mails)) etat.progression = { etape: 'traitement', faits: i++, total: mails.length }
         // Un mail qui échoue ne bloque pas les suivants : il sera retenté à la prochaine relève
         let r: ResultatTraitement
         try {
