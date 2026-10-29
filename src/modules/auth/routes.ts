@@ -57,6 +57,11 @@ authRouter.get('/me', requireAuth, (_req, res) => {
 
 const oubliSchema = z.object({ email: z.email().transform((e) => e.trim().toLowerCase()) })
 
+// La page de connexion n'affiche le lien « Mot de passe oublié ? » que si le serveur envoie les emails
+authRouter.get('/mot-de-passe-oublie', (_req, res) => {
+  ok(res, { disponible: envoiParServeur() })
+})
+
 // Réponse identique que le compte existe ou non : la page ne révèle pas quels emails ont un compte
 authRouter.post('/mot-de-passe-oublie', jetonLimiter, validate({ body: oubliSchema }), async (_req, res) => {
   if (!envoiParServeur()) {

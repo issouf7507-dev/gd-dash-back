@@ -203,6 +203,7 @@ describe('invitation et mot de passe oublié', () => {
   })
 
   it('mot de passe oublié : indisponible sans envoi d’email', async () => {
+    expect((await request(app).get('/api/auth/mot-de-passe-oublie')).body.data).toEqual({ disponible: false })
     expect((await request(app).post('/api/auth/mot-de-passe-oublie').send({ email: 'admin@test.local' })).status).toBe(503)
   })
 
@@ -210,6 +211,7 @@ describe('invitation et mot de passe oublié', () => {
     const dossier = await mkdtemp(path.join(os.tmpdir(), 'gd-test-mdp-'))
     Object.assign(env, { ENVOI_MAIL: 'dossier', ENVOI_MAIL_DOSSIER: dossier })
     try {
+      expect((await request(app).get('/api/auth/mot-de-passe-oublie')).body.data).toEqual({ disponible: true })
       const inconnu = await request(app).post('/api/auth/mot-de-passe-oublie').send({ email: 'personne@test.local' })
       expect(inconnu.status).toBe(200)
       expect(await readdir(dossier)).toHaveLength(0)
