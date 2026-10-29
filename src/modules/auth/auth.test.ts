@@ -1,7 +1,11 @@
 // Tests d'intégration sur la base gd_test (vraie base MySQL, pas de simulation).
+import { mkdtemp, readdir, readFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createApp } from '../../app.ts'
+import { env } from '../../config/env.ts'
 import { Role } from '../../generated/prisma/client.ts'
 import { hashPassword } from '../../lib/password.ts'
 import { prisma } from '../../lib/prisma.ts'
@@ -148,5 +152,78 @@ describe('/api/utilisateurs (Admin uniquement)', () => {
   it('404 pour un utilisateur inexistant', async () => {
     const { agent } = await loginAs('admin@test.local')
     expect((await agent.patch('/api/utilisateurs/inexistant').send({ prenom: 'Y' })).status).toBe(404)
+  })
+})
+
+describe('sessions coupées après un changement de mot de passe', () => {
+  it('la session ouverte avant le changement est refusée, la nouvelle fonctionne', async () => {
+    const { agent: conducteur } = await loginAs('conducteur@test.local')
+    expect((await conducteur.get('/api/auth/me')).status).toBe(200)
+    const { agent: admin } = await loginAs('admin@test.local')
+    expect((await admin.patch(`/api/utilisateurs/${ids.conducteur}`).send({ motDePasse: 'Nouveau-Pass-2026' })).status).toBe(200)
+    expect((await conducteur.get('/api/auth/me')).status).toBe(401)
+    expect((await loginAs('conducteur@test.local', 'Nouveau-Pass-2026')).res.status).toBe(200)
+  })
+
+  it('l’admin qui change son propre mot de passe reste connecté', async () => {
+    const { agent } = await loginAs('admin@test.local')
+    expect((await agent.patch(`/api/utilisateurs/${ids.admin}`).send({ motDePasse: PASSWORD })).status).toBe(200)
+    expect((await agent.get('/api/auth/me')).status).toBe(200)
+  })
+})
+
+describe('invitation et mot de passe oublié', () => {
+  const jetonDuLien = (lien: string) => new URL(lien).searchParams.get('jeton')!
+
+  it('invitation sans envoi d’email : le lien est remis à l’admin, il sert une seule fois', async () => {
+    const invite = await prisma.utilisateur.create({ data: { prenom: 'Ivan', nom: 'Invité', email: 'invite@test.local', role: Role.ADCI } })
+    const { agent: admin } = await loginAs('admin@test.local')
+    const res = await admin.post(`/api/utilisateurs/${invite.id}/inviter`)
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({ envoye: false, lien: expect.stringContaining('/definir-mot-de-passe?jeton=') })
+    const jeton = jetonDuLien(res.body.data.lien)
+
+    const anon = request.agent(app)
+    expect((await anon.get(`/api/auth/jeton/${jeton}`)).body.data).toEqual({ type: 'invitation', prenom: 'Ivan', email: 'invite@test.local' })
+    expect((await anon.post('/api/auth/definir-mot-de-passe').send({ jeton, motDePasse: 'court' })).status).toBe(400)
+    const ok = await anon.post('/api/auth/definir-mot-de-passe').send({ jeton, motDePasse: 'Mon-Pass-Invite-1' })
+    expect(ok.status).toBe(200)
+    expect(ok.body.data).toMatchObject({ email: 'invite@test.local', aMotDePasse: true })
+    expect((await anon.get('/api/auth/me')).status).toBe(200)
+    // Lien déjà utilisé
+    expect((await anon.get(`/api/auth/jeton/${jeton}`)).status).toBe(404)
+    expect((await request(app).post('/api/auth/definir-mot-de-passe').send({ jeton, motDePasse: 'Autre-Pass-2026-x' })).status).toBe(404)
+  })
+
+  it('pas d’invitation pour un compte désactivé, ni pour un non-admin', async () => {
+    const { agent: admin } = await loginAs('admin@test.local')
+    expect((await admin.post(`/api/utilisateurs/${ids.inactif}/inviter`)).status).toBe(409)
+    const { agent: conducteur } = await loginAs('conducteur@test.local', 'Nouveau-Pass-2026')
+    expect((await conducteur.post(`/api/utilisateurs/${ids.sansMdp}/inviter`)).status).toBe(403)
+  })
+
+  it('mot de passe oublié : indisponible sans envoi d’email', async () => {
+    expect((await request(app).post('/api/auth/mot-de-passe-oublie').send({ email: 'admin@test.local' })).status).toBe(503)
+  })
+
+  it('mot de passe oublié : même réponse pour un email inconnu, lien envoyé sinon', async () => {
+    const dossier = await mkdtemp(path.join(os.tmpdir(), 'gd-test-mdp-'))
+    Object.assign(env, { ENVOI_MAIL: 'dossier', ENVOI_MAIL_DOSSIER: dossier })
+    try {
+      const inconnu = await request(app).post('/api/auth/mot-de-passe-oublie').send({ email: 'personne@test.local' })
+      expect(inconnu.status).toBe(200)
+      expect(await readdir(dossier)).toHaveLength(0)
+
+      const connu = await request(app).post('/api/auth/mot-de-passe-oublie').send({ email: 'invite@test.local' })
+      expect(connu.body).toEqual(inconnu.body)
+      const [fichier] = await readdir(dossier)
+      const lien = (await readFile(path.join(dossier, fichier), 'utf8')).match(/http\S+/)![0]
+      const anon = request.agent(app)
+      expect((await anon.get(`/api/auth/jeton/${jetonDuLien(lien)}`)).body.data.type).toBe('reinitialisation')
+      expect((await anon.post('/api/auth/definir-mot-de-passe').send({ jeton: jetonDuLien(lien), motDePasse: 'Reinit-Pass-2026' })).status).toBe(200)
+      expect((await loginAs('invite@test.local', 'Reinit-Pass-2026')).res.status).toBe(200)
+    } finally {
+      Object.assign(env, { ENVOI_MAIL: 'off' })
+    }
   })
 })

@@ -1,4 +1,4 @@
-import { NIVEAUX_RELANCE, STATUTS_FACTURE_SAISIS } from '@gd/shared/types'
+import { STATUTS_FACTURE_SAISIS } from '@gd/shared/types'
 import { Router } from 'express'
 import { z } from 'zod'
 import type { Prisma } from '../../generated/prisma/client.ts'
@@ -35,10 +35,13 @@ export const toFactureDto = (f: FactureComplete) => ({
     niveau: niveauRelance.label(r.niveau),
     destinataire: destinataireRelance.label(r.destinataire),
     auteur: nomAuteur(r.envoyePar),
+    email: r.email,
+    statutEnvoi: r.statutEnvoi === 'ENVOYE' ? ('envoyé' as const) : ('échec' as const),
+    erreur: r.erreur,
   })),
 })
 
-const charger = async (id: string) => {
+export const charger = async (id: string) => {
   const f = await prisma.facture.findUnique({ where: { id }, include: avecDetails })
   if (!f) throw new NotFoundError('Facture introuvable')
   return f
@@ -47,7 +50,7 @@ const charger = async (id: string) => {
 export const facturesRouter = Router()
 facturesRouter.use(requireAuth)
 
-const canWrite = requireRole(Role.DIRECTION, Role.ADMIN, Role.CHARGE_AFFAIRES, Role.ADCI)
+export const canWrite = requireRole(Role.DIRECTION, Role.ADMIN, Role.CHARGE_AFFAIRES, Role.ADCI)
 const canDelete = requireRole(Role.DIRECTION, Role.ADMIN)
 const idParams = z.object({ id: z.string().min(1) })
 
@@ -125,32 +128,4 @@ reglementsRouter.delete('/:id', canWrite, validate({ params: idParams }), async 
   if (!r) throw new NotFoundError('Règlement introuvable')
   await prisma.reglement.delete({ where: { id: r.id } })
   ok(res, toFactureDto(await charger(r.factureId)))
-})
-
-// ─── Relances ────────────────────────────────────────────────
-
-const relanceSchema = z.object({
-  niveau: z.enum(NIVEAUX_RELANCE),
-  destinataire: z.enum(['client', "chargé d'affaires"]),
-  email: z.email().trim().toLowerCase(),
-  objet: z.string().trim().min(1).max(255),
-  corps: z.string().trim().min(1).max(20_000),
-})
-
-// Enregistre la relance dans l'historique de la facture (l'envoi automatique de l'email n'est pas encore branché)
-facturesRouter.post('/:id/relances', canWrite, validate({ params: idParams, body: relanceSchema }), async (_req, res) => {
-  const factureId = res.locals.params.id as string
-  await charger(factureId)
-  const { niveau, destinataire, ...r } = res.locals.body as z.infer<typeof relanceSchema>
-  await prisma.relance.create({
-    data: {
-      ...r,
-      factureId,
-      niveau: niveauRelance.key(niveau),
-      destinataire: destinataireRelance.key(destinataire),
-      envoyeParId: res.locals.user!.id,
-      statutEnvoi: 'ENVOYE',
-    },
-  })
-  ok(res, toFactureDto(await charger(factureId)), { status: 201 })
 })

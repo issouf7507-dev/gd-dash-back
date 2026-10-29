@@ -107,10 +107,21 @@ enum SourceDevis {
 }
 
 enum StatutDemande {
-  A_TRAITER  @map("À traiter")
-  DEVIS_CREE @map("Devis créé")
-  IGNOREE    @map("Ignorée")
-  ERREUR     @map("Erreur")
+  A_TRAITER          @map("À traiter")
+  DEVIS_CREE         @map("Devis créé")
+  INTERVENTION_CREEE @map("Intervention créée")
+  CHANTIER_CREE      @map("Chantier créé")
+  FACTURE_RATTACHEE  @map("Facture rattachée")
+  IGNOREE            @map("Ignorée")
+  ERREUR             @map("Erreur")
+}
+
+/// Boîte où apparaît une demande reçue : demandes de devis, d'intervention, mails de gros chantier ou de facturation
+enum BoiteDemande {
+  DEVIS        @map("Devis")
+  INTERVENTION @map("Intervention")
+  CHANTIER     @map("Chantier")
+  FACTURE      @map("Facture")
 }
 
 enum StatutImport {
@@ -130,16 +141,18 @@ enum TypeJeton {
 // ─────────────────────────────────────────────────────────────
 
 model Utilisateur {
-  id           String   @id @default(cuid())
-  prenom       String   @db.VarChar(100)
-  nom          String   @db.VarChar(100)
-  email        String   @unique @db.VarChar(191)
+  id             String   @id @default(cuid())
+  prenom         String   @db.VarChar(100)
+  nom            String   @db.VarChar(100)
+  email          String   @unique @db.VarChar(191)
   /// Null tant que l'utilisateur n'a pas défini son mot de passe (invitation)
-  passwordHash String?  @db.VarChar(255)
-  role         Role
-  actif        Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  passwordHash   String?  @db.VarChar(255)
+  role           Role
+  actif          Boolean  @default(true)
+  /// Incrémentée à chaque changement de mot de passe : les sessions ouvertes avant sont refusées
+  sessionVersion Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   devisConduits    Devis[]       @relation("DevisConducteur")
   chantiersCharges Chantier[]    @relation("ChantierChargeAffaires")
@@ -264,6 +277,7 @@ model Intervention {
   devis         Devis?        @relation(fields: [devisId], references: [id], onDelete: SetNull)
   numeroDevis   String?       @db.VarChar(50)
   commentaires  String        @db.Text
+  demandes      DemandeMail[]
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
@@ -303,6 +317,7 @@ model Chantier {
 
   observations Observation[]
   factures     Facture[]
+  demandes     DemandeMail[]
 
   @@index([statut])
   @@index([clientId])
@@ -312,17 +327,32 @@ model Chantier {
 
 /// Journal d'observations d'un chantier
 model Observation {
-  id         String       @id @default(cuid())
+  id         String             @id @default(cuid())
   chantierId String
-  chantier   Chantier     @relation(fields: [chantierId], references: [id], onDelete: Cascade)
-  date       DateTime     @db.Date
-  texte      String       @db.Text
+  chantier   Chantier           @relation(fields: [chantierId], references: [id], onDelete: Cascade)
+  date       DateTime           @db.Date
+  texte      String             @db.Text
   auteurId   String?
-  auteur     Utilisateur? @relation(fields: [auteurId], references: [id], onDelete: SetNull)
-  createdAt  DateTime     @default(now())
+  auteur     Utilisateur?       @relation(fields: [auteurId], references: [id], onDelete: SetNull)
+  createdAt  DateTime           @default(now())
+  photos     PhotoObservation[]
 
   @@index([chantierId, date])
   @@map("observations")
+}
+
+/// Photo jointe à une observation du journal. Le fichier est sur disque (PHOTOS_STOCKAGE), seul son nom est en base.
+model PhotoObservation {
+  id            String      @id @default(cuid())
+  observationId String
+  observation   Observation @relation(fields: [observationId], references: [id], onDelete: Cascade)
+  fichier       String      @db.VarChar(255)
+  type          String      @db.VarChar(50)
+  taille        Int
+  createdAt     DateTime    @default(now())
+
+  @@index([observationId])
+  @@map("photos_observation")
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -345,6 +375,7 @@ model Facture {
 
   reglements Reglement[]
   relances   Relance[]
+  demandes   DemandeMail[]
 
   @@index([chantierId])
   @@index([dateFacture])
@@ -449,45 +480,57 @@ model ImportMail {
 
 /// Demande de devis d'un client (ordre de service, demande PDF…) relevée dans la boîte contact@ (Outlook)
 model DemandeMail {
-  id          String            @id @default(cuid())
-  messageId   String            @unique @db.VarChar(255)
-  recuLe      DateTime
-  expediteur  String            @db.VarChar(255)
-  objet       String            @db.VarChar(500)
+  id             String            @id @default(cuid())
+  messageId      String            @unique @db.VarChar(255)
+  recuLe         DateTime
+  expediteur     String            @db.VarChar(255)
+  objet          String            @db.VarChar(500)
   /// Texte brut du mail (pour l'écran de traitement)
-  corps       String            @db.Text
-  statut      StatutDemande     @default(A_TRAITER)
+  corps          String            @db.Text
+  statut         StatutDemande     @default(A_TRAITER)
   /// Champs extraits (référence client, adresse, accès, contacts…), clés au format du front
-  donnees     Json
+  donnees        Json
   /// Points à vérifier, ou motif quand la demande est ignorée
-  anomalies   Json
+  anomalies      Json
   /// Pièces jointes conservées dans DEMANDES_STOCKAGE : [{ nom, fichier, type }]
-  pieces      Json
-  erreur      String?           @db.Text
-  devisId     String?
-  devis       Devis?            @relation(fields: [devisId], references: [id], onDelete: SetNull)
-  traiteParId String?
-  traitePar   Utilisateur?      @relation("DemandeTraiteePar", fields: [traiteParId], references: [id], onDelete: SetNull)
-  traiteLe    DateTime?
+  pieces         Json
+  erreur         String?           @db.Text
+  devisId        String?
+  devis          Devis?            @relation(fields: [devisId], references: [id], onDelete: SetNull)
+  /// Boîte où le mail apparaît. Null : mail reçu avant les demandes d'intervention, classé au démarrage
+  boite          BoiteDemande?
+  interventionId String?
+  intervention   Intervention?     @relation(fields: [interventionId], references: [id], onDelete: SetNull)
+  chantierId     String?
+  chantier       Chantier?         @relation(fields: [chantierId], references: [id], onDelete: SetNull)
+  factureId      String?
+  facture        Facture?          @relation(fields: [factureId], references: [id], onDelete: SetNull)
+  traiteParId    String?
+  traitePar      Utilisateur?      @relation("DemandeTraiteePar", fields: [traiteParId], references: [id], onDelete: SetNull)
+  traiteLe       DateTime?
   /// Rangement choisi par l'utilisateur (une seule catégorie par mail)
-  categorieId String?
-  categorie   CategorieDemande? @relation(fields: [categorieId], references: [id], onDelete: SetNull)
+  categorieId    String?
+  categorie      CategorieDemande? @relation(fields: [categorieId], references: [id], onDelete: SetNull)
   /// Dossier où le mail est classé (un seul, indépendant de la catégorie)
-  dossierId   String?
-  dossier     DossierDemande?   @relation(fields: [dossierId], references: [id], onDelete: SetNull)
+  dossierId      String?
+  dossier        DossierDemande?   @relation(fields: [dossierId], references: [id], onDelete: SetNull)
   /// Fil de discussion : les mails liés (réponse, même référence, même objet du même expéditeur) partagent la même valeur.
   /// Null tant que le mail n'a pas été rattaché (mails antérieurs à la fonction, regroupés au démarrage)
-  filId       String?           @db.VarChar(191)
+  filId          String?           @db.VarChar(191)
   /// Message-ID cités par le mail (In-Reply-To, References) pour le rattacher à son fil
-  refsFil     Json?
-  createdAt   DateTime          @default(now())
-  updatedAt   DateTime          @updatedAt
+  refsFil        Json?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
 
   @@index([statut])
   @@index([recuLe])
   @@index([categorieId])
   @@index([dossierId])
   @@index([filId])
+  @@index([boite])
+  @@index([interventionId])
+  @@index([chantierId])
+  @@index([factureId])
   @@map("demandes_mail")
 }
 

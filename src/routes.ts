@@ -7,6 +7,7 @@ import { devisRouter } from './modules/devis/routes.ts'
 import { facturesRouter, reglementsRouter } from './modules/factures/routes.ts'
 import { importsDevisRouter } from './modules/import-mail/routes.ts'
 import { healthRouter } from './modules/health/routes.ts'
+import { relancesRouter } from './modules/relances/routes.ts'
 import { intervenantsRouter } from './modules/intervenants/routes.ts'
 import { interventionsRouter } from './modules/interventions/routes.ts'
 import { utilisateursRouter } from './modules/utilisateurs/routes.ts'
@@ -25,5 +26,7 @@ apiRouter.use('/intervenants', intervenantsRouter)
 apiRouter.use('/interventions', interventionsRouter)
 apiRouter.use('/chantiers', chantiersRouter)
 apiRouter.use('/observations', observationsRouter)
+// Les relances partagent le préfixe /factures (POST /factures/:id/relances, GET /factures/relances/envoi)
+apiRouter.use('/factures', relancesRouter)
 apiRouter.use('/factures', facturesRouter)
 apiRouter.use('/reglements', reglementsRouter)

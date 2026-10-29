@@ -4,11 +4,14 @@ import { prisma } from '../lib/prisma.ts'
 import type { Role } from '../generated/prisma/client.ts'
 import { readSession, SESSION_COOKIE } from '../modules/auth/session.ts'
 
-/** Exige une session valide. L'utilisateur est relu en base à chaque requête : un compte désactivé est coupé immédiatement. */
+/**
+ * Exige une session valide. L'utilisateur est relu en base à chaque requête : un compte désactivé est coupé
+ * immédiatement, et une session ouverte avant un changement de mot de passe aussi (version de session dépassée).
+ */
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
-  const userId = readSession(req.cookies?.[SESSION_COOKIE])
-  const user = userId ? await prisma.utilisateur.findUnique({ where: { id: userId } }) : null
-  if (!user || !user.actif) return next(new UnauthenticatedError())
+  const session = readSession(req.cookies?.[SESSION_COOKIE])
+  const user = session ? await prisma.utilisateur.findUnique({ where: { id: session.userId } }) : null
+  if (!user || !user.actif || user.sessionVersion !== session!.version) return next(new UnauthenticatedError())
   res.locals.user = user
   next()
 }

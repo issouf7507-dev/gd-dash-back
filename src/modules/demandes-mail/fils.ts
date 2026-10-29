@@ -120,7 +120,7 @@ export async function mailsDuFil(id: string, filId: string | null) {
   return prisma.demandeMail.findMany({
     where: filId ? { filId } : { id },
     orderBy: { recuLe: 'asc' },
-    select: { id: true, recuLe: true, expediteur: true, objet: true, statut: true },
+    select: { id: true, recuLe: true, expediteur: true, objet: true, statut: true, boite: true },
   })
 }
 

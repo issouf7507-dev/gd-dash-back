@@ -37,7 +37,7 @@ const idParams = z.object({ id: z.string().min(1) })
 const date = z.iso.date().nullable()
 const texte = (max: number) => z.string().trim().max(max)
 
-const schema = z.object({
+export const interventionSchema = z.object({
   numero: texte(50).min(1, 'Le numéro est obligatoire'),
   planification: z.enum(PLANIFICATIONS).default('À planifier'),
   categorie: z.enum(CATEGORIES),
@@ -52,10 +52,11 @@ const schema = z.object({
   numeroDevis: texte(50).nullable().default(null),
   commentaires: texte(10_000).default(''),
 })
-type Input = z.infer<typeof schema>
+export type InterventionInput = z.infer<typeof interventionSchema>
+type Input = InterventionInput
 
 /** Libellés → valeurs Prisma. Le n° de devis saisi est relié au devis correspondant s'il existe. */
-async function toData(v: Partial<Input>) {
+export async function toInterventionData(v: Partial<Input>) {
   const devis = v.numeroDevis ? await prisma.devis.findUnique({ where: { numero: v.numeroDevis }, select: { id: true } }) : null
   return defini({
     ...v,
@@ -67,7 +68,7 @@ async function toData(v: Partial<Input>) {
   }) satisfies Prisma.InterventionUncheckedUpdateInput
 }
 
-const mapError = erreurEcriture('Ce numéro d’intervention existe déjà', 'clientId', 'Client ou technicien introuvable')
+export const mapInterventionError = erreurEcriture('Ce numéro d’intervention existe déjà', 'clientId', 'Client ou technicien introuvable')
 
 interventionsRouter.get('/', async (_req, res) => {
   const list = await prisma.intervention.findMany({ orderBy: [{ datePassage: 'desc' }, { numero: 'desc' }] })
@@ -81,16 +82,16 @@ interventionsRouter.post('/supprimer', canDelete, validate({ body: idsSchema }),
   ok(res, { count })
 })
 
-interventionsRouter.post('/', canWrite, validate({ body: schema }), async (_req, res) => {
-  const data = (await toData(res.locals.body as Input)) as Prisma.InterventionUncheckedCreateInput
-  const i = await prisma.intervention.create({ data }).catch(mapError)
+interventionsRouter.post('/', canWrite, validate({ body: interventionSchema }), async (_req, res) => {
+  const data = (await toInterventionData(res.locals.body as Input)) as Prisma.InterventionUncheckedCreateInput
+  const i = await prisma.intervention.create({ data }).catch(mapInterventionError)
   ok(res, toInterventionDto(i), { status: 201 })
 })
 
-interventionsRouter.patch('/:id', canWrite, validate({ params: idParams, body: schema.partial() }), async (_req, res) => {
+interventionsRouter.patch('/:id', canWrite, validate({ params: idParams, body: interventionSchema.partial() }), async (_req, res) => {
   const id = res.locals.params.id as string
   if (!(await prisma.intervention.findUnique({ where: { id }, select: { id: true } }))) throw new NotFoundError('Intervention introuvable')
-  const i = await prisma.intervention.update({ where: { id }, data: await toData(res.locals.body as Partial<Input>) }).catch(mapError)
+  const i = await prisma.intervention.update({ where: { id }, data: await toInterventionData(res.locals.body as Partial<Input>) }).catch(mapInterventionError)
   ok(res, toInterventionDto(i))
 })
 

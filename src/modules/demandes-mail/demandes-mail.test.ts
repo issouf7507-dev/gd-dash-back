@@ -1,6 +1,7 @@
 // Demandes de devis clients : extraction sur des mails calqués sur de vrais mails reçus sur contact@
 // (données anonymisées), puis parcours complet sur la base gd_test.
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import request from 'supertest'
@@ -11,9 +12,9 @@ import { hashPassword } from '../../lib/password.ts'
 import { prisma } from '../../lib/prisma.ts'
 import { eml } from '../import-mail/exemples.ts'
 import { sourceDossier } from '../import-mail/sources/dossier.ts'
-import { extraireDemande, rapprocherClientDemande } from './extract.ts'
+import { boiteDe, dossierAutoDe, extraireDemande, extraireReglement, rapprocherClientDemande, ressembleACv } from './extract.ts'
 import { objetNormalise, regrouperAnciens } from './fils.ts'
-import { relever } from './service.ts'
+import { classerAnciens, dossierStockage, rangerDossiersAuto, relever } from './service.ts'
 
 if (!process.env.DATABASE_URL?.includes('/gd_test')) throw new Error('Les tests doivent tourner sur la base gd_test')
 
@@ -178,6 +179,56 @@ describe('extraction', () => {
     expect(extraireDemande(mailLu({ objet: 'Nos promotions du mois', corps: 'Profitez de -20 % sur toute la gamme.' })).estUneDemande).toBe(false)
   })
 
+  it('range dans la boîte Intervention ce qui ressemble à une intervention', () => {
+    expect(extraireDemande(mailLu({ corps: ORDRE_DE_SERVICE })).boite).toBe('Intervention')
+    expect(boiteDe('Bonjour, fuite importante dans la cage d’escalier, merci de passer au plus vite')).toBe('Intervention')
+    expect(boiteDe('Dépannage gouttière bouchée au 3 rue des Lilas')).toBe('Intervention')
+    expect(boiteDe('Merci de nous établir un devis pour la réfection de la toiture')).toBe('Devis')
+    expect(boiteDe('Merci de prévoir un rendez-vous mardi')).toBe('Devis')
+    // Une demande d'intervention sans métier reconnu n'est pas écartée
+    expect(extraireDemande(mailLu({ objet: 'Sinistre dégât des eaux', corps: 'Bonjour, pouvez-vous intervenir chez Mme Durand ?' })).estUneDemande).toBe(true)
+  })
+
+  it('range dans la boîte Chantier ce qui concerne un gros chantier', () => {
+    expect(boiteDe('Compte-rendu de chantier n°4 - résidence Les Tilleuls')).toBe('Chantier')
+    expect(boiteDe('Réunion de chantier mardi 9h, merci de confirmer')).toBe('Chantier')
+    expect(boiteDe('Appel d’offres : réfection complète de la toiture, DCE en pièce jointe')).toBe('Chantier')
+    expect(boiteDe('Montage de l’échafaudage prévu lundi')).toBe('Chantier')
+    expect(boiteDe('Demande de devis pour une gouttière')).toBe('Devis')
+    expect(extraireDemande(mailLu({ objet: 'Planning de chantier', corps: 'Bonjour, voici le planning.' })).estUneDemande).toBe(true)
+  })
+
+  it('range dans la boîte Facture les paiements et factures, et lit le règlement', () => {
+    expect(boiteDe('Avis de virement - FONCIA SEINE OUEST')).toBe('Facture')
+    expect(boiteDe('Relance facture impayée FGD26-00012')).toBe('Facture')
+    expect(boiteDe('Pouvez-vous nous envoyer un duplicata de la facture n° FGD26-00007 ?')).toBe('Facture')
+    // Un ordre de service qui parle de « votre facture » reste une intervention
+    expect(boiteDe('Ordre de service N° OS123 : fuite. Votre facture devra être adressée au syndic.')).toBe('Intervention')
+    const r = extraireReglement('Avis de virement\nNous avons effectué le virement de 4 250,50 € pour la facture FGD26-00012.\nDate de valeur : 20/10/2026', new Date('2026-10-21'))
+    expect(r).toEqual({ numeroFacture: 'FGD26-00012', montant: 4250.5, mode: 'Virement', date: '2026-10-20' })
+    expect(extraireReglement('Bonjour', new Date('2026-10-21'))).toEqual({ numeroFacture: null, montant: null, mode: null, date: '2026-10-21' })
+  })
+
+  it('choisit le dossier automatique : publicité, fournisseurs, administratif, sous-traitants, assurances, marchés publics', () => {
+    const dossier = (texte: string, expediteur = 'x@client.fr') => dossierAutoDe({ texte, expediteur, nomsPieces: [] })
+    expect(dossier('Nos promotions du mois. Pour vous désabonner, cliquez ici')).toMatchObject({ nom: 'Publicité / newsletters', ecarter: true })
+    expect(dossier('Votre bon de livraison n° 12345', 'agence@pointp.fr')).toMatchObject({ nom: 'Fournisseurs', ecarter: true })
+    expect(dossier('Bonjour, voici le tarif', 'commercial@lariviere.fr')).toMatchObject({ nom: 'Fournisseurs' })
+    expect(dossier('Votre attestation de vigilance URSSAF')).toMatchObject({ nom: 'Sous-traitants' })
+    expect(dossier('Échéance URSSAF du 15/11')).toMatchObject({ nom: 'Administratif', ecarter: true })
+    // Peuvent mener à des travaux : rangés mais pas écartés
+    expect(dossier('Rendez-vous d’expertise le 12/11 - réf. sinistre 4587')).toMatchObject({ nom: 'Assurances / sinistres', ecarter: false })
+    expect(dossier('Avis d’appel public à la concurrence - réfection de toiture')).toMatchObject({ nom: 'Marchés publics', ecarter: false })
+    expect(dossier('Bonjour, pouvez-vous nous faire un devis pour une gouttière ?')).toBeNull()
+  })
+
+  it('reconnaît une candidature (CV)', () => {
+    expect(ressembleACv('Bonjour', ['CV_Jean_Dupont.pdf'])).toBe(true)
+    expect(ressembleACv('Candidature spontanée couvreur', [])).toBe(true)
+    expect(ressembleACv('', ['Jean Dupont.pdf'], 'Expériences professionnelles\nFormation\nCompétences')).toBe(true)
+    expect(ressembleACv('Merci d’intervenir pour une fuite', ['devis-cvc.pdf', 'photo.jpg'], 'Formation des prix')).toBe(false)
+  })
+
   it('reconnaît le client par le domaine de son adresse, ou par son nom cité dans le mail', () => {
     const clients = [
       { id: 'a', nom: 'FONCIA SEINE OUEST', email: null },
@@ -217,13 +268,21 @@ describe('relève et traitement', () => {
     const etat = await relever(sourceDossier(dossier))
     expect(etat.dernierResultat).toEqual({ 'à traiter': 3, ignorée: 1 })
 
-    const liste = (await adci.get('/api/demandes-devis').expect(200)).body.data as { objet: string; statut: string; anomalies: string[]; pieces: unknown[] }[]
+    type Ligne = { objet: string; statut: string; boite: string; anomalies: string[]; pieces: unknown[] }
+    const devis = (await adci.get('/api/demandes-devis').expect(200)).body.data as Ligne[]
+    const interventions = (await adci.get('/api/demandes-devis?boite=Intervention').expect(200)).body.data as Ligne[]
+    // Les ordres de service commandent des travaux : boîte Intervention
+    expect(interventions.map((d) => d.boite)).toEqual(['Intervention', 'Intervention'])
+    expect(devis.every((d) => d.boite === 'Devis')).toBe(true)
+    const liste = [...devis, ...interventions]
     const pdf = liste.find((d) => d.objet === 'Reprise maçonnerie sol cave')!
     expect(pdf).toMatchObject({ statut: 'À traiter', pieces: [{ nom: 'Reprise maçonnerie sol cave166484.pdf', type: 'application/pdf' }] })
     expect(pdf.anomalies).toEqual(['Client inconnu : CABINET MOREAU', 'Catégorie non détectée'])
     expect(liste.find((d) => d.objet === 'Nos promotions du mois')?.statut).toBe('Ignorée')
+    const pub = await prisma.demandeMail.findFirstOrThrow({ where: { objet: 'Nos promotions du mois' }, include: { dossier: true } })
+    expect(pub.dossier?.nom).toBe('Publicité / newsletters')
     expect(liste.filter((d) => d.anomalies.includes('Déjà reçue (réf. OSMIL100000001)'))).toHaveLength(1)
-    expect((await adci.get('/api/demandes-devis/etat').expect(200)).body.data.aTraiter).toBe(3)
+    expect((await adci.get('/api/demandes-devis/etat').expect(200)).body.data).toMatchObject({ aTraiter: 1, aTraiterInterventions: 2 })
   })
 
   it('sert la pièce jointe', async () => {
@@ -231,6 +290,46 @@ describe('relève et traitement', () => {
     const res = await adci.get(`/api/demandes-devis/${d.id}/pieces/0`).expect(200)
     expect(res.headers['content-type']).toMatch(/pdf/)
     await adci.get(`/api/demandes-devis/${d.id}/pieces/5`).expect(404)
+  })
+
+  it('télécharge sans l’afficher une pièce jointe qui pourrait exécuter du code (HTML, SVG…)', async () => {
+    await mkdir(dossierStockage(), { recursive: true })
+    const fichier = `${randomUUID()}.html`
+    await writeFile(path.join(dossierStockage(), fichier), '<script>fetch("/api/utilisateurs")</script>')
+    const d = await prisma.demandeMail.create({
+      data: {
+        messageId: '<piece-html@test>',
+        recuLe: new Date(),
+        expediteur: 'pirate@exemple.com',
+        objet: 'Facture',
+        corps: '',
+        donnees: {},
+        anomalies: [],
+        pieces: [{ nom: 'facture.html', type: 'text/html', fichier }, { nom: 'logo.svg', type: 'image/svg+xml', fichier }],
+      },
+    })
+    for (const index of [0, 1]) {
+      const res = await adci.get(`/api/demandes-devis/${d.id}/pieces/${index}`).expect(200)
+      expect(res.headers['content-type']).toBe('application/octet-stream')
+      expect(res.headers['content-disposition']).toMatch(/^attachment;/)
+      expect(res.headers['content-security-policy']).toContain('sandbox')
+    }
+    await prisma.demandeMail.delete({ where: { id: d.id } })
+    await rm(path.join(dossierStockage(), fichier))
+  })
+
+  it('ne crée qu’un devis quand la demande est validée deux fois en même temps', async () => {
+    const d = await prisma.demandeMail.create({
+      data: { messageId: '<double-clic@test>', recuLe: new Date(), expediteur: 'a@b.fr', objet: 'Double clic', corps: '', donnees: {}, anomalies: [], pieces: [] },
+    })
+    const devis = { categorie: 'Couverture', clientId: 'c-foncia', adresse: '1 rue du Test' }
+    const reponses = await Promise.all(
+      ['DGD26-9001', 'DGD26-9002'].map((numero) => adci.post(`/api/demandes-devis/${d.id}/creer-devis`).send({ ...devis, numero })),
+    )
+    expect(reponses.map((r) => r.status).sort()).toEqual([201, 409])
+    expect(await prisma.devis.count({ where: { numero: { in: ['DGD26-9001', 'DGD26-9002'] } } })).toBe(1)
+    await prisma.demandeMail.delete({ where: { id: d.id } })
+    await prisma.devis.deleteMany({ where: { numero: { in: ['DGD26-9001', 'DGD26-9002'] } } })
   })
 
   it('crée le devis pré-rempli une fois le n° saisi, puis refuse de le recréer', async () => {
@@ -250,6 +349,125 @@ describe('relève et traitement', () => {
     await adci.post(`/api/demandes-devis/${d.id}/lier`).send({ numero: 'INCONNU' }).expect(404)
     const res = await adci.post(`/api/demandes-devis/${d.id}/lier`).send({ numero: 'DGD26-1001' }).expect(200)
     expect(res.body.data.statut).toBe('Devis créé')
+  })
+
+  it('crée l’intervention pré-remplie depuis une demande de la boîte Intervention', async () => {
+    const { champs } = extraireDemande(mailLu({ corps: ORDRE_DE_SERVICE }))
+    const d = await prisma.demandeMail.create({
+      data: {
+        messageId: '<os-intervention@test>',
+        recuLe: new Date(),
+        expediteur: 'no-reply@foncia.com',
+        objet: 'Ordre de service N° OSMIL100000002',
+        corps: ORDRE_DE_SERVICE,
+        boite: 'INTERVENTION',
+        donnees: JSON.parse(JSON.stringify({ champs, client: { clientId: 'c-foncia', confiance: 'sûr' } })),
+        anomalies: [],
+        pieces: [],
+      },
+    })
+    const dto = (await adci.get(`/api/demandes-devis/${d.id}`).expect(200)).body.data
+    expect(dto.interventionProposee).toMatchObject({ clientId: 'c-foncia', adresse: '1 ALLEE DES LILAS 92110 CLICHY', numero: '' })
+    await adci.post(`/api/demandes-devis/${d.id}/creer-intervention`).send(dto.interventionProposee).expect(400)
+    const res = await adci.post(`/api/demandes-devis/${d.id}/creer-intervention`).send({ ...dto.interventionProposee, numero: 'INT-T-001' }).expect(201)
+    expect(res.body.data).toMatchObject({ numero: 'INT-T-001', clientId: 'c-foncia' })
+    expect((await adci.get(`/api/demandes-devis/${d.id}`).expect(200)).body.data).toMatchObject({ statut: 'Intervention créée', interventionId: res.body.data.id })
+    await adci.post(`/api/demandes-devis/${d.id}/creer-intervention`).send({ ...dto.interventionProposee, numero: 'INT-T-002' }).expect(409)
+    await adci.post(`/api/demandes-devis/${d.id}/boite`).send({ boite: 'Devis' }).expect(409)
+    // Même référence que l'ordre de service relevé : on ne fausse pas le test des fils
+    await prisma.demandeMail.delete({ where: { id: d.id } })
+  })
+
+  it('crée le chantier pré-rempli depuis une demande de la boîte Chantier, avec la demande dans son journal', async () => {
+    const corps = 'Bonjour,\nCompte-rendu de chantier : réfection complète de la couverture, 1 allée des Lilas 92110 Clichy.\nCordialement'
+    const { champs } = extraireDemande(mailLu({ objet: 'CR de chantier Clichy', corps }))
+    const d = await prisma.demandeMail.create({
+      data: {
+        messageId: '<chantier@test>',
+        recuLe: new Date(),
+        expediteur: 'moe@archi.fr',
+        objet: 'CR de chantier Clichy',
+        corps,
+        boite: 'CHANTIER',
+        donnees: JSON.parse(JSON.stringify({ champs, client: { clientId: 'c-foncia', confiance: 'sûr' } })),
+        anomalies: [],
+        pieces: [],
+      },
+    })
+    expect((await adci.get('/api/demandes-devis?boite=Chantier').expect(200)).body.data.map((x: { id: string }) => x.id)).toContain(d.id)
+    expect((await adci.get('/api/demandes-devis/etat').expect(200)).body.data.aTraiterChantiers).toBeGreaterThanOrEqual(1)
+    const dto = (await adci.get(`/api/demandes-devis/${d.id}`).expect(200)).body.data
+    expect(dto.chantierPropose).toMatchObject({ clientId: 'c-foncia', numero: '', statut: 'À venir' })
+    expect(dto.chantierPropose.observation).toContain('réfection complète')
+    const res = await adci.post(`/api/demandes-devis/${d.id}/creer-chantier`).send({ ...dto.chantierPropose, numero: 'CHT-T-001', adresse: '1 allée des Lilas 92110 Clichy' }).expect(201)
+    expect(res.body.data).toMatchObject({ numero: 'CHT-T-001', clientId: 'c-foncia' })
+    expect(await prisma.observation.findMany({ where: { chantierId: res.body.data.id } })).toMatchObject([{ texte: expect.stringContaining('réfection complète') }])
+    expect((await adci.get(`/api/demandes-devis/${d.id}`).expect(200)).body.data).toMatchObject({ statut: 'Chantier créé', chantierId: res.body.data.id })
+    await adci.post(`/api/demandes-devis/${d.id}/creer-chantier`).send({ ...dto.chantierPropose, numero: 'CHT-T-002', adresse: 'x' }).expect(409)
+    await prisma.demandeMail.delete({ where: { id: d.id } })
+
+    // Un autre mail du même chantier y est rattaché, son texte va au journal
+    const cr = await prisma.demandeMail.create({
+      data: { messageId: '<chantier-2@test>', recuLe: new Date(), expediteur: 'moe@archi.fr', objet: 'CR n°2', corps: '', boite: 'CHANTIER', donnees: {}, anomalies: [], pieces: [] },
+    })
+    await adci.post(`/api/demandes-devis/${cr.id}/lier-chantier`).send({ chantierId: 'inconnu' }).expect(404)
+    const lie = (await adci.post(`/api/demandes-devis/${cr.id}/lier-chantier`).send({ chantierId: res.body.data.id, observation: 'CR n°2 : couverture posée' }).expect(200)).body.data
+    expect(lie).toMatchObject({ statut: 'Chantier créé', chantierId: res.body.data.id })
+    expect(await prisma.observation.count({ where: { chantierId: res.body.data.id } })).toBe(2)
+    await prisma.demandeMail.delete({ where: { id: cr.id } })
+    // Les autres fichiers de test suppriment les clients : le chantier ne doit pas rester
+    await prisma.chantier.delete({ where: { id: res.body.data.id } })
+  })
+
+  it('rattache un avis de paiement à sa facture et enregistre le règlement', async () => {
+    const ch = await prisma.chantier.create({ data: { numero: 'CHT-T-F', devisNumeros: [], adresse: 'x', clientId: 'c-foncia', categorie: 'COUVERTURE', equipes: '' } })
+    const f = await prisma.facture.create({ data: { numero: 'FGD26-09001', chantierId: ch.id, situation: 'S1', dateFacture: new Date('2026-10-01'), montantTTC: 1200 } })
+    const corps = 'Bonjour,\nNous avons effectué le virement de 1 200,00 € pour la facture FGD26-09001.\nCordialement'
+    const d = await prisma.demandeMail.create({
+      data: { messageId: '<paiement@test>', recuLe: new Date('2026-10-22'), expediteur: 'compta@foncia.com', objet: 'Avis de virement', corps, boite: 'FACTURE', donnees: {}, anomalies: [], pieces: [] },
+    })
+    expect((await adci.get('/api/demandes-devis?boite=Facture').expect(200)).body.data.map((x: { id: string }) => x.id)).toContain(d.id)
+    expect((await adci.get('/api/demandes-devis/etat').expect(200)).body.data.aTraiterFactures).toBeGreaterThanOrEqual(1)
+    const dto = (await adci.get(`/api/demandes-devis/${d.id}`).expect(200)).body.data
+    expect(dto.reglementLu).toEqual({ numeroFacture: 'FGD26-09001', montant: 1200, mode: 'Virement', date: '2026-10-22' })
+
+    await adci.post(`/api/demandes-devis/${d.id}/rattacher-facture`).send({ factureId: 'inconnue' }).expect(404)
+    const { numeroFacture: _n, ...reglement } = dto.reglementLu
+    const res = await adci.post(`/api/demandes-devis/${d.id}/rattacher-facture`).send({ factureId: f.id, reglement }).expect(200)
+    expect(res.body.data).toMatchObject({ statut: 'Facture rattachée', factureId: f.id })
+    expect(await prisma.reglement.findMany({ where: { factureId: f.id } })).toMatchObject([{ mode: 'Virement' }])
+    await adci.post(`/api/demandes-devis/${d.id}/rattacher-facture`).send({ factureId: f.id }).expect(409)
+
+    await prisma.demandeMail.delete({ where: { id: d.id } })
+    await prisma.facture.delete({ where: { id: f.id } })
+    await prisma.chantier.delete({ where: { id: ch.id } })
+  })
+
+  it('déplace une demande dans l’autre boîte', async () => {
+    const d = await prisma.demandeMail.findFirstOrThrow({ where: { objet: 'Reprise maçonnerie sol cave' } })
+    await adci.post(`/api/demandes-devis/${d.id}/boite`).send({ boite: 'Autre' }).expect(400)
+    expect((await adci.post(`/api/demandes-devis/${d.id}/boite`).send({ boite: 'Intervention' }).expect(200)).body.data.boite).toBe('Intervention')
+    expect((await adci.get('/api/demandes-devis?boite=Intervention').expect(200)).body.data.map((x: { id: string }) => x.id)).toContain(d.id)
+    await adci.post(`/api/demandes-devis/${d.id}/boite`).send({ boite: 'Devis' }).expect(200)
+  })
+
+  it('range les mails reçus avant les boîtes, et reprend ceux écartés à tort', async () => {
+    const ancien = await prisma.demandeMail.create({
+      data: {
+        messageId: '<ancien-fuite@test>',
+        recuLe: new Date('2026-10-01'),
+        expediteur: 'gardien@residence.fr',
+        objet: 'Fuite au plafond',
+        corps: 'Bonjour, il y a une fuite au plafond du 4e étage.',
+        statut: 'IGNOREE',
+        donnees: {},
+        anomalies: ['Ce mail ne ressemble pas à une demande de devis'],
+        pieces: [],
+      },
+    })
+    await classerAnciens()
+    expect(await prisma.demandeMail.findUniqueOrThrow({ where: { id: ancien.id } })).toMatchObject({ boite: 'INTERVENTION', statut: 'A_TRAITER', anomalies: [] })
+    await prisma.demandeMail.delete({ where: { id: ancien.id } })
   })
 
   it('ignore puis reprend une demande', async () => {
@@ -287,7 +505,7 @@ describe('relève et traitement', () => {
     await adci.patch(`${dossiers}/${foncia.id}`).send({ parentId: urgent.id }).expect(409)
     await adci.patch(`${dossiers}/${foncia.id}`).send({ parentId: foncia.id }).expect(409)
 
-    const ids = (await prisma.demandeMail.findMany({ take: 2, orderBy: { recuLe: 'desc' }, select: { id: true } })).map((d) => d.id)
+    const ids = (await prisma.demandeMail.findMany({ where: { boite: 'DEVIS' }, take: 2, orderBy: { recuLe: 'desc' }, select: { id: true } })).map((d) => d.id)
     await adci.post('/api/demandes-devis/classer').send({ ids: [ids[0]], dossierId: foncia.id }).expect(200)
     await adci.post('/api/demandes-devis/classer').send({ ids: [ids[1]], dossierId: urgent.id }).expect(200)
     await adci.post('/api/demandes-devis/classer').send({ ids, dossierId: 'inconnu' }).expect(404)
@@ -308,7 +526,9 @@ describe('relève et traitement', () => {
     await adci.patch(`${dossiers}/${urgent.id}`).send({ nom: 'Très urgent', parentId: archives.id }).expect(200)
     await adci.patch(`${dossiers}/${urgent.id}`).send({ parentId: foncia.id }).expect(200)
     await adci.delete(`${dossiers}/${foncia.id}`).expect(200)
-    expect((await adci.get(dossiers).expect(200)).body.data.dossiers.map((d: { nom: string }) => d.nom).sort()).toEqual(['Archives', 'Urgent'])
+    // Hors dossiers automatiques (la newsletter relevée a créé « Publicité / newsletters »)
+    const noms = (await adci.get(dossiers).expect(200)).body.data.dossiers.map((d: { nom: string }) => d.nom)
+    expect(noms.filter((n: string) => n !== 'Publicité / newsletters').sort()).toEqual(['Archives', 'Urgent'])
     for (const id of ids) expect((await adci.get(`/api/demandes-devis/${id}`).expect(200)).body.data.dossierId).toBeNull()
   })
 
@@ -349,6 +569,40 @@ describe('relève et traitement', () => {
     await regrouperAnciens()
     const apres = await Promise.all([1, 2, 3, 4].map(mail))
     expect(apres.map((m) => m.filId)).toEqual([m1.id, m1.id, m1.id, m4.id])
+  })
+
+  it('range les candidatures dans le dossier CV, à l’arrivée comme pour les mails déjà reçus', async () => {
+    await prisma.dossierDemande.deleteMany({ where: { nom: 'CV', parentId: null } })
+    const ancien = await prisma.demandeMail.create({
+      data: {
+        messageId: '<ancien-cv@test>',
+        recuLe: new Date('2026-09-01'),
+        expediteur: 'jean.dupont@gmail.com',
+        objet: 'Candidature couvreur zingueur',
+        corps: 'Bonjour, je souhaite intervenir sur vos chantiers en tant que couvreur.',
+        boite: 'INTERVENTION',
+        donnees: {},
+        anomalies: [],
+        pieces: [],
+      },
+    })
+    const dossier = await mkdtemp(path.join(os.tmpdir(), 'gd-demandes-cv-'))
+    await writeFile(
+      path.join(dossier, 'cv.eml'),
+      eml({ messageId: 'cv-1@gmail.com', date: new Date(), de: 'Marie Martin <marie.martin@gmail.com>', a: 'contact@gdcouverture.fr', objet: 'Poste de couvreur', texte: 'Bonjour, ci-joint mon dossier. Disponible pour intervenir en urgence.', pdf: { nom: 'CV Marie Martin.pdf', lignes: ['Marie Martin'] } }),
+    )
+    await relever(sourceDossier(dossier))
+    const cv = await prisma.dossierDemande.findFirstOrThrow({ where: { nom: 'CV', parentId: null } })
+    expect(await prisma.demandeMail.findUniqueOrThrow({ where: { messageId: '<cv-1@gmail.com>' } })).toMatchObject({ dossierId: cv.id, statut: 'IGNOREE', boite: 'DEVIS' })
+
+    // Le mail reçu avant le dossier y est rangé au démarrage, une seule fois
+    await prisma.dossierDemande.update({ where: { id: cv.id }, data: { createdAt: new Date() } })
+    await rangerDossiersAuto()
+    expect(await prisma.demandeMail.findUniqueOrThrow({ where: { id: ancien.id } })).toMatchObject({ dossierId: cv.id, statut: 'IGNOREE', boite: 'DEVIS' })
+    await prisma.demandeMail.update({ where: { id: ancien.id }, data: { dossierId: null } })
+    await rangerDossiersAuto()
+    expect((await prisma.demandeMail.findUniqueOrThrow({ where: { id: ancien.id } })).dossierId).toBeNull()
+    expect((await prisma.dossierDemande.findMany({ where: { nom: 'CV' } })).length).toBe(1)
   })
 })
 
