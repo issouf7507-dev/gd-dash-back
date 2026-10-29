@@ -3,7 +3,7 @@
 // Règles écrites sur de vrais mails reçus sur contact@ : un ordre de service Foncia (texte du mail)
 // et une demande de devis de syndic (PDF seul).
 import type { Categorie } from '@gd/shared/types'
-import { detecterCategorie, lignes, parseDate, type MailLu } from '../import-mail/extract.ts'
+import { detecterCategorie, lignes, parseDate, parseMontant, type MailLu } from '../import-mail/extract.ts'
 import { normaliserNom, rapprocherClient, type ClientConnu, type Rapprochement } from '../import-mail/match-client.ts'
 
 export type TypeDemande = 'Ordre de service' | 'Demande de devis' | 'Autre'
@@ -28,9 +28,25 @@ export interface ChampsDemande {
   urgent: boolean
 }
 
+export type Boite = 'Devis' | 'Intervention' | 'Chantier' | 'Facture'
+
 export interface ExtractionDemande {
   estUneDemande: boolean
+  /** Boîte où ranger le mail : demande de chiffrage, demande d'intervention (dépannage, fuite, ordre de service…), gros chantier ou facturation */
+  boite: Boite
   champs: ChampsDemande
+  /** Paiement ou facture cités dans le mail (utile dans la boîte Facture) */
+  reglement: ReglementLu
+}
+
+export interface ReglementLu {
+  /** N° de facture GD cité (ex. FGD26-00012) */
+  numeroFacture: string | null
+  montant: number | null
+  /** Virement, Chèque, Prélèvement… */
+  mode: string | null
+  /** Date du paiement (AAAA-MM-JJ) */
+  date: string | null
 }
 
 /** Domaines de GD (la boîte relevée et les collègues qui transfèrent) */
@@ -54,6 +70,109 @@ const REFERENCES: RegExp[] = [
 
 /** Formules qui marquent sans ambiguïté une demande de chiffrage ou de travaux */
 const DEMANDE_FORTE = /ordre de service|demande de devis|(?:[ée]tablir|faire|chiffrer|transmettre|adresser|envoyer|faire parvenir|proposer)\b[^.\n]{0,40}\bdevis|devis pour|chiffrage|bon de commande|merci d['’]intervenir|intervention urgente/i
+
+/** Le client demande un chiffrage (pas encore de travaux commandés) */
+const DEMANDE_DEVIS = /demande de devis|(?:[ée]tablir|faire|chiffrer|transmettre|adresser|envoyer|faire parvenir|proposer)\b[^.\n]{0,40}\bdevis|devis pour|chiffrage/i
+
+/** Le client demande qu'on passe sur place : dépannage, urgence, ordre de service, sinistre… */
+const DEMANDE_INTERVENTION =
+  /ordre de service|bon d['’]intervention|merci d['’]intervenir|\bintervenir\b|\binterventions?\b|d[ée]pann|r[ée]paration|\bfuites?\b|infiltrations?|d[ée]g[aâ]ts? des eaux|sinistre|\burgen(?:t|te|ts|tes|ce)\b|recherche de fuite|b[aâ]chage|mise en s[ée]curit[ée]|engorg|bouch[ée]e?s?\b|tuiles? (?:tomb|cass|envol|d[ée]plac)|passer (?:sur place|voir|constater)/i
+
+/** Vocabulaire des gros chantiers : marché, consultation, suivi de chantier, maîtrise d'œuvre… */
+const GROS_CHANTIER =
+  /r[ée]union de chantier|compte[- ]rendu (?:de |du )?chantier|\bCR de chantier|planning (?:des travaux|de chantier|du chantier)|d[ée]marrage (?:des travaux|du chantier)|ordre de d[ée]marrage|[ée]chafaudage|ma[îi]tr(?:e|ise) d['’](?:[œo]e?uvre|ouvrage)|\bMOE\b|appel d['’]offres?|\bDCE\b|\bCCTP\b|\bDPGF\b|\blot n[°o]|PV de r[ée]ception|lev[ée]e des r[ée]serves|travaux vot[ée]s|r[ée]fection (?:compl[eè]te|totale|int[ée]grale)|gros chantier/i
+
+/** Paiement annoncé ou réclamé : sans ambiguïté, l'emporte sur tout le reste */
+const PAIEMENT =
+  /avis de (?:paiement|virement|r[èe]glement|domiciliation)|virement (?:effectu[ée]|[ée]mis|bancaire|de \d)|remise de ch[èe]que|lettre[- ]ch[èe]que|\bimpay[ée]e?s?\b|relance (?:de paiement|facture|pour (?:la )?facture)|bon pour paiement|attestation de paiement|mise en paiement|paiement (?:de|du|des) (?:la |votre |vos |notre )?factures?|r[èe]glement (?:de|du|des) (?:la |votre |vos |notre )?factures?/i
+/** Facture citée : moins fort qu'un paiement, un ordre de service parle souvent de « votre facture » */
+const FACTURE = /\bfacture\s*n[°o]|\bFGD\d{2}-\d+|situation (?:de travaux|n[°o])|\bavoir n[°o]|duplicata|relev[ée] de compte|(?:ci-joint|vous trouverez)[^.\n]{0,30}\bfacture/i
+
+/**
+ * Boîte du mail. Un paiement l'emporte ; puis le vocabulaire de gros chantier ; un ordre de service commande des travaux ;
+ * une facture citée va en facturation ; sinon une demande de chiffrage explicite reste un devis.
+ */
+export function boiteDe(texte: string): Boite {
+  if (PAIEMENT.test(texte)) return 'Facture'
+  if (GROS_CHANTIER.test(texte)) return 'Chantier'
+  if (/ordre de service|bon d['’]intervention/i.test(texte)) return 'Intervention'
+  if (FACTURE.test(texte)) return 'Facture'
+  if (DEMANDE_DEVIS.test(texte)) return 'Devis'
+  return DEMANDE_INTERVENTION.test(texte) ? 'Intervention' : 'Devis'
+}
+
+/** Candidature : CV en pièce jointe, ou mail qui parle de CV / candidature */
+const CV_PIECE = /(?:^|[^a-z])(?:cv|curriculum)(?:[^a-z]|$)/i
+const CV_TEXTE = /\bcv\b|curriculum vitae|candidature|lettre de motivation|recherche d['’](?:un )?(?:emploi|stage|alternance)|offre d['’]emploi/i
+/** Rubriques d'un CV : il en faut au moins deux dans le PDF */
+const RUBRIQUES_CV = [/exp[ée]riences? professionnelles?/i, /\bformations?\b/i, /comp[ée]tences/i, /centres? d['’]int[ée]r[êe]ts?/i, /\blangues\b/i, /\bdipl[ôo]mes?\b/i]
+
+/** Le mail ressemble à une candidature (CV) : texte du mail, noms des pièces jointes, texte des PDF. */
+export function ressembleACv(texteMail: string, nomsPieces: string[], textePdf = ''): boolean {
+  if (nomsPieces.some((n) => CV_PIECE.test(n.replace(/\.[a-z0-9]+$/i, '')))) return true
+  if (CV_TEXTE.test(texteMail)) return true
+  return RUBRIQUES_CV.filter((r) => r.test(textePdf)).length >= 2
+}
+
+/** Ce qu'on regarde pour ranger un mail dans un dossier automatique */
+export interface MailARanger {
+  /** Objet et texte du mail */
+  texte: string
+  /** Adresse de l'expéditeur */
+  expediteur: string
+  nomsPieces: string[]
+  textePdf?: string
+}
+
+export interface DossierAuto {
+  nom: string
+  /** Motif affiché quand le mail est écarté */
+  motif: string
+  /** Le mail n'est pas une demande client : il sort de la file « À traiter » */
+  ecarter: boolean
+}
+
+const NEGOCES =
+  /@(?:[\w-]+\.)*(?:pointp|cedeo|lariviere|gedimat|bigmat|raboni|sfic|prolians|dispano|chausson|wienerberger|terreal|edilians|monier|bmigroup|vmzinc|siga|soprema|siplast|velux|descours-cabaud|tout-faire)\.[a-z]+$/i
+const FOURNISSEUR = /bon de livraison|confirmation de (?:votre )?commande|accus[ée] de r[ée]ception de (?:votre )?commande|avis d['’]exp[ée]dition|votre commande n[°o]|proforma|bon de commande fournisseur/i
+const SOUS_TRAITANT = /attestation de vigilance|\bk-?bis\b|sous[- ]trait(?:ant|ance)|\bDC4\b|attestation (?:urssaf|fiscale) de r[ée]gularit[ée]/i
+const ASSURANCE =
+  /\bexpert(?:ise)?s?\b|cabinet d['’]expertise|n[°o] de sinistre|r[ée]f(?:[ée]rence)?\.? sinistre|\bassureurs?\b|compagnie d['’]assurance|d[ée]cennale|attestation d['’]assurance|dommages[- ]ouvrage/i
+const MARCHE_PUBLIC =
+  /avis d['’]appel public|\bBOAMP\b|march[ée]s? publics?|achatpublic|maximilien|place des march[ée]s|marches-publics\.gouv|dematis|aws-achat|\bJOUE\b|profil acheteur/i
+const ADMINISTRATIF =
+  /\burssaf\b|impots\.gouv|\bDGFiP\b|net-entreprises|pro ?btp\b|\bCIBTP\b|btp[- ]pr[ée]voyance|caisse (?:des )?cong[ée]s pay[ée]s|relev[ée] (?:de compte )?bancaire|pr[ée]l[èe]vement SEPA|avis d['’]imp[ôo]t|d[ée]claration sociale nominative|\bDSN\b/i
+const PUBLICITE =
+  /se d[ée]sabonner|d[ée]sinscri(?:re|ption|vez)|unsubscribe|newsletter|webinaire|webinar|offre promotionnelle|promotions? du mois|voir (?:la )?version en ligne|ne plus recevoir (?:nos|ces) (?:e-?mails|messages|offres)/i
+
+/** Dossiers remplis automatiquement, dans l'ordre où ils sont essayés (le premier qui correspond l'emporte). */
+export const DOSSIERS_AUTO: (DossierAuto & { correspond: (m: MailARanger) => boolean })[] = [
+  {
+    nom: 'CV',
+    motif: 'Candidature (CV) : rangée dans le dossier CV',
+    ecarter: true,
+    correspond: (m) => ressembleACv(m.texte, m.nomsPieces, m.textePdf),
+  },
+  // Assurances et marchés publics peuvent mener à des travaux : rangés mais gardés « À traiter »
+  { nom: 'Assurances / sinistres', motif: 'Rangé dans le dossier Assurances / sinistres', ecarter: false, correspond: (m) => ASSURANCE.test(m.texte) },
+  { nom: 'Marchés publics', motif: 'Rangé dans le dossier Marchés publics', ecarter: false, correspond: (m) => MARCHE_PUBLIC.test(m.texte) },
+  // Une newsletter de négoce est d'abord une publicité
+  { nom: 'Publicité / newsletters', motif: 'Publicité ou newsletter : rangée dans le dossier Publicité / newsletters', ecarter: true, correspond: (m) => PUBLICITE.test(m.texte) },
+  { nom: 'Sous-traitants', motif: 'Mail de sous-traitant : rangé dans le dossier Sous-traitants', ecarter: true, correspond: (m) => SOUS_TRAITANT.test(m.texte) },
+  { nom: 'Administratif', motif: 'Mail administratif : rangé dans le dossier Administratif', ecarter: true, correspond: (m) => ADMINISTRATIF.test(m.texte) },
+  {
+    nom: 'Fournisseurs',
+    motif: 'Mail de fournisseur : rangé dans le dossier Fournisseurs',
+    ecarter: true,
+    correspond: (m) => NEGOCES.test(m.expediteur) || FOURNISSEUR.test(m.texte),
+  },
+]
+
+/** Dossier automatique du mail (null : aucun). */
+export function dossierAutoDe(m: MailARanger): DossierAuto | null {
+  const d = DOSSIERS_AUTO.find((x) => x.correspond(m))
+  return d ? { nom: d.nom, motif: d.motif, ecarter: d.ecarter } : null
+}
 
 /** Lignes qui terminent le descriptif (formules de politesse, observations, transferts…) */
 const FIN_DESCRIPTIF =
@@ -126,6 +245,31 @@ function descriptifDe(ls: string[], objetMail: string): string | null {
   return (tout || repli || null)?.slice(0, 3000) ?? null
 }
 
+const MONTANT = String.raw`(\d{1,3}(?:[\s .]\d{3})*(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:€|eur(?:os?)?\b)`
+
+/** N° de facture, montant, mode et date d'un paiement cités dans le mail. */
+export function extraireReglement(texte: string, dateMail: Date): ReglementLu {
+  const numeroFacture =
+    texte.match(/\b(FGD\d{2}-\d{3,6})\b/i)?.[1]?.toUpperCase() ?? texte.match(/facture\s*n[°o]\.?\s*:?\s*([A-Z0-9][A-Z0-9/-]{2,})/i)?.[1] ?? null
+  // Le montant le plus proche d'un mot de paiement, sinon le premier montant en euros
+  const proche = texte.match(new RegExp(String.raw`(?:montant|somme|total|virement|r[èe]glement|paiement|ch[èe]que)[^\n€]{0,40}?${MONTANT}`, 'i'))?.[1]
+  const brut = proche ?? texte.match(new RegExp(MONTANT, 'i'))?.[1]
+  const montant = brut ? parseMontant(brut) : null
+  const mode = /virement/i.test(texte)
+    ? 'Virement'
+    : /ch[èe]que/i.test(texte)
+      ? 'Chèque'
+      : /pr[ée]l[èe]vement/i.test(texte)
+        ? 'Prélèvement'
+        : null
+  const date =
+    lignes(texte)
+      .filter((l) => /(?:date (?:de |du )?(?:paiement|virement|r[èe]glement|valeur|op[ée]ration)|vir[ée] le|pay[ée] le|effectu[ée] le)/i.test(l))
+      .map(parseDate)
+      .find(Boolean) ?? dateMail.toISOString().slice(0, 10)
+  return { numeroFacture, montant: montant && montant > 0 ? montant : null, mode, date }
+}
+
 export function extraireDemande(mail: MailLu): ExtractionDemande {
   const corps = lignes(mail.corps)
   const pdf = lignes(mail.textePdf)
@@ -166,10 +310,14 @@ export function extraireDemande(mail: MailLu): ExtractionDemande {
   // « GD Couverture » (en-tête des PDF, destinataires) ne dit rien du métier demandé
   const { categorie, incertaine } = detecterCategorie([mail.objet, descriptif ?? '', ...pdf].join('\n').replace(/gd\s*couverture/gi, ''))
 
-  const estUneDemande = DEMANDE_FORTE.test(tout) || (/\b(?:devis|intervention|intervenir|travaux)\b/i.test(tout) && categorie !== null)
+  const boite = boiteDe(tout)
+  // Tout ce qui ressemble à une intervention ou à un gros chantier est gardé, même sans métier reconnu
+  const estUneDemande = DEMANDE_FORTE.test(tout) || (/\b(?:devis|intervention|intervenir|travaux)\b/i.test(tout) && categorie !== null) || boite !== 'Devis'
 
   return {
     estUneDemande,
+    boite,
+    reglement: extraireReglement([mail.objet, ...ls].join('\n'), mail.date),
     champs: {
       type,
       reference,

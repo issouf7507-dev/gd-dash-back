@@ -48,6 +48,15 @@ const schema = z.object({
   GRAPH_BOITE: z.string().default('contact@gdcouverture.fr'),
   /** Dossier Outlook relevé (inbox = Boîte de réception) */
   GRAPH_DOSSIER: z.string().default('inbox'),
+
+  // Envoi des emails sortants (relances de facture)
+  /** off : l'email s'ouvre dans la messagerie de l'utilisateur · dossier : écrit des .eml (développement) · graph : envoyé depuis GRAPH_BOITE */
+  ENVOI_MAIL: z.enum(['off', 'dossier', 'graph']).default('off'),
+  ENVOI_MAIL_DOSSIER: z.string().default('data/mails-sortants'),
+  /** Dossier des photos du journal de chantier */
+  PHOTOS_STOCKAGE: z.string().default('data/photos'),
+  /** Adresse publique du front, pour les liens envoyés par email (invitation, mot de passe oublié). Vide : CORS_ORIGIN. */
+  APP_URL: z.string().optional().transform((v) => v || undefined),
 })
 
 const parsed = schema.safeParse(process.env)
@@ -66,5 +75,10 @@ if (parsed.data.DEMANDES_SOURCE === 'graph' && (!parsed.data.GRAPH_TENANT_ID || 
   process.exit(1)
 }
 
-export const env = parsed.data
+if (parsed.data.ENVOI_MAIL === 'graph' && (!parsed.data.GRAPH_TENANT_ID || !parsed.data.GRAPH_CLIENT_ID || !parsed.data.GRAPH_CLIENT_SECRET)) {
+  console.error('❌ ENVOI_MAIL=graph : renseignez GRAPH_TENANT_ID, GRAPH_CLIENT_ID et GRAPH_CLIENT_SECRET dans server/.env')
+  process.exit(1)
+}
+
+export const env = { ...parsed.data, APP_URL: (parsed.data.APP_URL ?? parsed.data.CORS_ORIGIN).replace(/\/$/, '') }
 export const isProd = env.NODE_ENV === 'production'

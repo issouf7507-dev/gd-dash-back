@@ -5,6 +5,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { env } from '../../config/env.ts'
 import { Prisma, SourceDevis, StatutImport } from '../../generated/prisma/client.ts'
+import { ConflictError } from '../../lib/app-error.ts'
 import { categorie as categorieMap } from '../../lib/labels.ts'
 import { logger } from '../../lib/logger.ts'
 import { isUniqueViolation } from '../../lib/prisma-errors.ts'
@@ -99,11 +100,14 @@ export function devisPropose(d: DonneesImport): Partial<DevisInput> {
 /** Crée le devis à partir d'un import et marque l'import « Importé », en une seule transaction. */
 export async function creerDevisDepuisImport(importId: string, input: DevisInput, userId: string | null) {
   return prisma.$transaction(async (tx) => {
-    const devis = await tx.devis.create({ data: { ...(toDevisCreate(input)), source: SourceDevis.MAIL } })
-    await tx.importMail.update({
-      where: { id: importId },
-      data: { statut: StatutImport.IMPORTE, devisId: devis.id, traiteParId: userId, traiteLe: new Date() },
+    // Verrou sur la ligne : la relève automatique et un clic « Valider » simultanés ne créent pas deux devis
+    const { count } = await tx.importMail.updateMany({
+      where: { id: importId, statut: { not: StatutImport.IMPORTE } },
+      data: { statut: StatutImport.IMPORTE, traiteParId: userId, traiteLe: new Date() },
     })
+    if (!count) throw new ConflictError('Ce devis a déjà été importé')
+    const devis = await tx.devis.create({ data: { ...(toDevisCreate(input)), source: SourceDevis.MAIL } })
+    await tx.importMail.update({ where: { id: importId }, data: { devisId: devis.id } })
     return devis
   })
 }

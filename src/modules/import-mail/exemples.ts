@@ -44,6 +44,8 @@ interface MailExemple {
   objet: string
   texte: string
   pdf?: { nom: string; lignes: string[] }
+  /** Message-ID (sans chevrons) du mail auquel celui-ci répond */
+  enReponseA?: string
 }
 
 /** Mail au format .eml (multipart, texte + PDF en base64). */
@@ -73,6 +75,7 @@ export function eml(m: MailExemple): Buffer {
       `From: ${m.de}`,
       `To: ${m.a}`,
       `Subject: ${enTete(m.objet)}`,
+      ...(m.enReponseA ? [`In-Reply-To: <${m.enReponseA}>`, `References: <${m.enReponseA}>`] : []),
       'MIME-Version: 1.0',
       `Content-Type: multipart/mixed; boundary="${b}"`,
       '',

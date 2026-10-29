@@ -1,7 +1,9 @@
 import { ROLES } from '@gd/shared/types'
 import { Router } from 'express'
 import { z } from 'zod'
-import { ConflictError, ForbiddenError, NotFoundError } from '../../lib/app-error.ts'
+import { AppError, ConflictError, ForbiddenError, NotFoundError } from '../../lib/app-error.ts'
+import { envoiParServeur, envoyerMail } from '../../lib/envoi-mail.ts'
+import { creerJeton, lienMotDePasse } from '../../lib/jetons.ts'
 import { Role, roleKey, roleLabel } from '../../lib/labels.ts'
 import { hashPassword, PASSWORD_RULE, PASSWORD_RULE_MESSAGE } from '../../lib/password.ts'
 import { isForeignKeyViolation, isUniqueViolation } from '../../lib/prisma-errors.ts'
@@ -9,6 +11,7 @@ import { prisma } from '../../lib/prisma.ts'
 import { ok } from '../../lib/response.ts'
 import { requireAuth, requireRole } from '../../middleware/auth.ts'
 import { validate } from '../../middleware/validate.ts'
+import { openSession } from '../auth/session.ts'
 import { toUtilisateurDto } from './dto.ts'
 
 export const utilisateursRouter = Router()
@@ -79,14 +82,38 @@ utilisateursRouter.patch('/:id', validate({ params: idParams, body: updateSchema
       data: {
         ...data,
         ...(role && { role: roleKey(role) }),
-        ...(mdp && { passwordHash: await hashPassword(mdp) }),
+        // Nouveau mot de passe : les sessions déjà ouvertes (peut-être par un tiers) sont coupées
+        ...(mdp && { passwordHash: await hashPassword(mdp), sessionVersion: { increment: 1 } }),
       },
     })
+    // L'administrateur qui change son propre mot de passe reste connecté sur ce navigateur
+    if (mdp && id === me.id) openSession(res, user)
     ok(res, toUtilisateurDto(user))
   } catch (err) {
     if (isUniqueViolation(err)) throw new ConflictError('Un utilisateur existe déjà avec cet email')
     throw err
   }
+})
+
+// Invitation (ou nouvel accès) : lien à usage unique, valable 7 jours, pour choisir son mot de passe.
+// Envoyé par email si le serveur envoie les emails ; sinon le lien est renvoyé à l'administrateur, qui le transmet.
+utilisateursRouter.post('/:id/inviter', validate({ params: idParams }), async (_req, res) => {
+  const user = await prisma.utilisateur.findUnique({ where: { id: res.locals.params.id } })
+  if (!user) throw new NotFoundError('Utilisateur introuvable')
+  if (!user.actif) throw new ConflictError("Ce compte est désactivé : réactivez-le avant d'envoyer une invitation")
+  const lien = lienMotDePasse(await creerJeton(user.id, 'INVITATION'))
+  if (!envoiParServeur()) return ok(res, { envoye: false, lien })
+  const invitant = `${res.locals.user!.prenom} ${res.locals.user!.nom}`.trim()
+  try {
+    await envoyerMail({
+      a: user.email,
+      objet: 'Votre accès au tableau de bord GD',
+      corps: `Bonjour ${user.prenom},\n\n${invitant} vous a ouvert un accès au tableau de bord GD.\n\nPour choisir votre mot de passe, ouvrez ce lien (valable 7 jours) :\n${lien}\n\nVotre identifiant est votre adresse email : ${user.email}\n\nGD`,
+    })
+  } catch (err) {
+    throw new AppError(`L'invitation n'a pas pu être envoyée : ${err instanceof Error ? err.message : err}`, 502, 'SERVICE_UNAVAILABLE')
+  }
+  ok(res, { envoye: true, lien: null })
 })
 
 // Refusée si l'utilisateur a un historique (devis, chantiers, observations…) : on le désactive à la place

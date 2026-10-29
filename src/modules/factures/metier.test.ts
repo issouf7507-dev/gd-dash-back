@@ -1,7 +1,11 @@
 // Intervenants, interventions, chantiers (+ journal) et factures (+ règlements, relances) sur la base gd_test.
+import { access, mkdtemp, readdir, readFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createApp } from '../../app.ts'
+import { env } from '../../config/env.ts'
 import { Categorie, Role, TypeClient } from '../../generated/prisma/client.ts'
 import { hashPassword } from '../../lib/password.ts'
 import { prisma } from '../../lib/prisma.ts'
@@ -129,8 +133,33 @@ describe('chantiers et journal', () => {
     expect((await conducteur.patch(`/api/chantiers/${ids.chantier}`).send({ statut: 'En cours' })).status).toBe(403)
     const res = await conducteur.post(`/api/chantiers/${ids.chantier}/observations`).send({ date: '2026-11-03', texte: 'Échafaudage monté' })
     expect(res.status).toBe(201)
-    expect(res.body.data).toMatchObject({ chantierId: ids.chantier, date: '2026-11-03', auteur: 'Nuno BRANCO' })
+    expect(res.body.data).toMatchObject({ chantierId: ids.chantier, date: '2026-11-03', auteur: 'Nuno BRANCO', photos: [] })
     expect((await adci.get('/api/observations')).body.data).toHaveLength(1)
+    ids.observation = res.body.data.id
+  })
+
+  it('photos du journal : ajout par le conducteur, lecture, refus des faux fichiers, retrait', async () => {
+    const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(200, 1)])
+    const ajout = await conducteur.post(`/api/observations/${ids.observation}/photos`).set('Content-Type', 'image/jpeg').send(jpeg)
+    expect(ajout.status).toBe(201)
+    expect(ajout.body.data.photos).toHaveLength(1)
+    const photoId = ajout.body.data.photos[0].id
+
+    const lue = await adci.get(`/api/observations/photos/${photoId}`).buffer(true)
+    expect(lue.status).toBe(200)
+    expect(lue.headers['content-type']).toBe('image/jpeg')
+    expect(Buffer.compare(lue.body, jpeg)).toBe(0)
+
+    // Contenu qui n'est pas une image, malgré l'en-tête
+    const faux = await conducteur.post(`/api/observations/${ids.observation}/photos`).set('Content-Type', 'image/png').send(Buffer.from('<script>alert(1)</script>'))
+    expect(faux.status).toBe(400)
+    // L'ADCI ne tient pas le journal
+    expect((await adci.post(`/api/observations/${ids.observation}/photos`).set('Content-Type', 'image/jpeg').send(jpeg)).status).toBe(403)
+
+    const fichier = (await prisma.photoObservation.findUniqueOrThrow({ where: { id: photoId } })).fichier
+    expect((await conducteur.delete(`/api/observations/photos/${photoId}`)).body.data.photos).toHaveLength(0)
+    expect((await adci.get(`/api/observations/photos/${photoId}`)).status).toBe(404)
+    await expect(access(path.join(process.env.PHOTOS_STOCKAGE!, fichier))).rejects.toThrow()
   })
 })
 
@@ -157,8 +186,42 @@ describe('factures, règlements et relances', () => {
       .post(`/api/factures/${ids.facture}/relances`)
       .send({ niveau: 'R1', destinataire: "chargé d'affaires", email: 'ca@test.local', objet: 'Rappel', corps: 'Bonjour' })
     expect(rel.status).toBe(201)
-    expect(rel.body.data.relances).toMatchObject([{ niveau: 'R1', destinataire: "chargé d'affaires", auteur: 'Dir Ection' }])
+    expect(rel.body.data.relances).toMatchObject([{ niveau: 'R1', destinataire: "chargé d'affaires", auteur: 'Dir Ection', statutEnvoi: 'envoyé', erreur: null }])
+    expect((await direction.get('/api/factures/relances/envoi')).body.data).toEqual({ mode: 'messagerie', expediteur: null })
     expect((await direction.delete(`/api/reglements/${ids.reglement}`)).body.data.reglements).toHaveLength(0)
+  })
+
+  it('envoi par le serveur : l’email part (ici en .eml) et la relance est notée envoyée', async () => {
+    const dossier = await mkdtemp(path.join(os.tmpdir(), 'gd-test-mails-'))
+    Object.assign(env, { ENVOI_MAIL: 'dossier', ENVOI_MAIL_DOSSIER: dossier })
+    try {
+      expect((await direction.get('/api/factures/relances/envoi')).body.data.mode).toBe('serveur')
+      const rel = await direction
+        .post(`/api/factures/${ids.facture}/relances`)
+        .send({ niveau: 'R2', destinataire: 'client', email: 'client@test.local', objet: '2e relance — facture impayée', corps: 'Madame,\nMerci.' })
+      expect(rel.status).toBe(201)
+      expect(rel.body.data.relances.at(-1)).toMatchObject({ niveau: 'R2', email: 'client@test.local', statutEnvoi: 'envoyé' })
+      const [fichier] = await readdir(dossier)
+      const eml = await readFile(path.join(dossier, fichier), 'utf8')
+      expect(eml).toContain('To: client@test.local')
+      expect(eml).toContain('Madame,\r\nMerci.')
+    } finally {
+      Object.assign(env, { ENVOI_MAIL: 'off' })
+    }
+  })
+
+  it('un envoi en échec est noté avec sa cause', async () => {
+    // Dossier impossible à créer : l'envoi échoue
+    Object.assign(env, { ENVOI_MAIL: 'dossier', ENVOI_MAIL_DOSSIER: '/dev/null/impossible' })
+    try {
+      const rel = await direction
+        .post(`/api/factures/${ids.facture}/relances`)
+        .send({ niveau: 'R3', destinataire: 'client', email: 'client@test.local', objet: '3e relance', corps: 'Bonjour' })
+      expect(rel.status).toBe(201)
+      expect(rel.body.data.relances.at(-1)).toMatchObject({ niveau: 'R3', statutEnvoi: 'échec', erreur: expect.any(String) })
+    } finally {
+      Object.assign(env, { ENVOI_MAIL: 'off' })
+    }
   })
 
   it('un chantier facturé ne peut pas être supprimé', async () => {

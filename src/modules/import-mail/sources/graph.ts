@@ -1,17 +1,13 @@
+import { erreurGraph, GRAPH, jetonGraph, type IdentifiantsGraph } from '../../../lib/graph.ts'
 import type { MailBrut, SourceMails } from './types.ts'
 
-interface GraphConfig {
-  tenantId: string
-  clientId: string
-  clientSecret: string
+interface GraphConfig extends IdentifiantsGraph {
   /** Adresse de la boîte relevée (ex. contact@gdcouverture.fr) */
   boite: string
   /** Dossier Outlook (inbox = Boîte de réception) */
   dossier: string
   jours: number
 }
-
-const GRAPH = 'https://graph.microsoft.com/v1.0'
 
 /**
  * Lit une boîte Outlook / Microsoft 365 via Microsoft Graph, avec une application Entra
@@ -20,31 +16,11 @@ const GRAPH = 'https://graph.microsoft.com/v1.0'
  * Les mails déjà traités sont reconnus par leur Message-ID et ne sont pas retéléchargés.
  */
 export function sourceGraph(cfg: GraphConfig): SourceMails {
-  let jeton: { valeur: string; expire: number } | null = null
-
-  async function token() {
-    if (jeton && jeton.expire > Date.now() + 60_000) return jeton.valeur
-    const r = await fetch(`https://login.microsoftonline.com/${encodeURIComponent(cfg.tenantId)}/oauth2/v2.0/token`, {
-      method: 'POST',
-      body: new URLSearchParams({
-        client_id: cfg.clientId,
-        client_secret: cfg.clientSecret,
-        scope: 'https://graph.microsoft.com/.default',
-        grant_type: 'client_credentials',
-      }),
-    })
-    const corps = (await r.json().catch(() => ({}))) as { access_token?: string; expires_in?: number; error_description?: string }
-    if (!r.ok || !corps.access_token) throw new Error(`Connexion Microsoft refusée : ${corps.error_description?.split('\n')[0] ?? r.status}`)
-    jeton = { valeur: corps.access_token, expire: Date.now() + (corps.expires_in ?? 3600) * 1000 }
-    return jeton.valeur
-  }
+  const token = jetonGraph(cfg)
 
   async function get(url: string) {
     const r = await fetch(url, { headers: { Authorization: `Bearer ${await token()}` } })
-    if (!r.ok) {
-      const detail = ((await r.json().catch(() => null)) as { error?: { message?: string } } | null)?.error?.message
-      throw new Error(`Microsoft Graph ${r.status} : ${detail ?? r.statusText}`)
-    }
+    if (!r.ok) throw await erreurGraph(r)
     return r
   }
 

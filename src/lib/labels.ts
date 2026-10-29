@@ -25,6 +25,7 @@ import {
   StatutConducteur,
   StatutFacture,
   StatutDemande,
+  BoiteDemande,
   StatutImport,
   TypeClient,
   TypeIntervenant,
@@ -81,11 +82,20 @@ export const statutImport = mapping<StatutImport, 'À vérifier' | 'Importé' | 
   IGNORE: 'Ignoré',
   ERREUR: 'Erreur',
 })
-export const statutDemande = mapping<StatutDemande, 'À traiter' | 'Devis créé' | 'Ignorée' | 'Erreur'>({
+export const statutDemande = mapping<StatutDemande, 'À traiter' | 'Devis créé' | 'Intervention créée' | 'Chantier créé' | 'Facture rattachée' | 'Ignorée' | 'Erreur'>({
   A_TRAITER: 'À traiter',
   DEVIS_CREE: 'Devis créé',
+  INTERVENTION_CREEE: 'Intervention créée',
+  CHANTIER_CREE: 'Chantier créé',
+  FACTURE_RATTACHEE: 'Facture rattachée',
   IGNOREE: 'Ignorée',
   ERREUR: 'Erreur',
+})
+export const boiteDemande = mapping<BoiteDemande, 'Devis' | 'Intervention' | 'Chantier' | 'Facture'>({
+  DEVIS: 'Devis',
+  INTERVENTION: 'Intervention',
+  CHANTIER: 'Chantier',
+  FACTURE: 'Facture',
 })
 export const typeClient = mapping<TypeClient, TypeClientLabel>({
   SYNDIC: 'Syndic / Gestionnaire',
