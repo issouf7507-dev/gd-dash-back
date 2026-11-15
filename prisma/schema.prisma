@@ -51,6 +51,14 @@ enum StatutConducteur {
   VALIDE     @map("Validé")
 }
 
+/// Réponse du client au devis envoyé
+enum ResultatDevis {
+  EN_ATTENTE @map("En attente")
+  ACCEPTE    @map("Accepté")
+  REFUSE     @map("Refusé")
+  SANS_SUITE @map("Sans suite")
+}
+
 enum RelanceDevis {
   OUI
   NON
@@ -154,14 +162,16 @@ model Utilisateur {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  devisConduits    Devis[]       @relation("DevisConducteur")
-  chantiersCharges Chantier[]    @relation("ChantierChargeAffaires")
-  observations     Observation[]
-  relancesEnvoyees Relance[]
-  jetons           JetonAuth[]
-  auditLogs        AuditLog[]
-  importsTraites   ImportMail[]  @relation("ImportTraitePar")
-  demandesTraitees DemandeMail[] @relation("DemandeTraiteePar")
+  devisConduits     Devis[]       @relation("DevisConducteur")
+  chantiersCharges  Chantier[]    @relation("ChantierChargeAffaires")
+  observations      Observation[]
+  relancesEnvoyees  Relance[]
+  jetons            JetonAuth[]
+  auditLogs         AuditLog[]
+  importsTraites    ImportMail[]  @relation("ImportTraitePar")
+  demandesTraitees  DemandeMail[] @relation("DemandeTraiteePar")
+  demandesAffectees DemandeMail[] @relation("DemandeAffecteeA")
+  equipes           Equipe[]
 
   @@map("utilisateurs")
 }
@@ -243,6 +253,13 @@ model Devis {
   /// Montant HT lu sur le devis SolutionsBTP (import mail) ou saisi
   montantHT        Decimal?          @db.Decimal(12, 2)
   source           SourceDevis       @default(SAISIE)
+  /// Réponse du client : saisie à la main, ou lue dans son mail (accord, devis signé, refus)
+  resultat         ResultatDevis     @default(EN_ATTENTE)
+  resultatLe       DateTime?         @db.Date
+  motifRefus       String?           @db.VarChar(500)
+  /// Mail du client d'où la réponse a été lue (null : saisie à la main)
+  resultatMailId   String?
+  resultatMail     DemandeMail?      @relation("ResultatDevisMail", fields: [resultatMailId], references: [id], onDelete: SetNull)
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
 
@@ -251,6 +268,7 @@ model Devis {
   demandes      DemandeMail[]
 
   @@index([statutADCI])
+  @@index([resultat])
   @@index([datePassage])
   @@index([clientId])
   @@index([conducteurId])
@@ -508,6 +526,12 @@ model DemandeMail {
   traiteParId    String?
   traitePar      Utilisateur?      @relation("DemandeTraiteePar", fields: [traiteParId], references: [id], onDelete: SetNull)
   traiteLe       DateTime?
+  /// Devis dont ce mail porte la réponse du client (accord, refus)
+  resultatsDevis Devis[]           @relation("ResultatDevisMail")
+  /// Personne chargée de traiter la demande (affectée depuis la liste ou le CRM)
+  affecteAId     String?
+  affecteA       Utilisateur?      @relation("DemandeAffecteeA", fields: [affecteAId], references: [id], onDelete: SetNull)
+  affecteLe      DateTime?
   /// Rangement choisi par l'utilisateur (une seule catégorie par mail)
   categorieId    String?
   categorie      CategorieDemande? @relation(fields: [categorieId], references: [id], onDelete: SetNull)
@@ -531,7 +555,21 @@ model DemandeMail {
   @@index([interventionId])
   @@index([chantierId])
   @@index([factureId])
+  @@index([affecteAId])
   @@map("demandes_mail")
+}
+
+/// Équipe du CRM : regroupe des utilisateurs (un utilisateur peut être dans plusieurs équipes)
+model Equipe {
+  id        String        @id @default(cuid())
+  nom       String        @unique @db.VarChar(60)
+  /// Couleur de la pastille (gray, red, amber, green, blue, violet, orange, sky)
+  couleur   String        @default("blue") @db.VarChar(20)
+  membres   Utilisateur[]
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@map("equipes")
 }
 
 /// Catégories créées par les utilisateurs pour ranger les demandes reçues par mail

@@ -41,6 +41,8 @@ const schema = z.object({
   DEMANDES_INTERVALLE_MIN: z.coerce.number().min(1).default(5),
   /** Nombre de jours relus à chaque relève (les mails déjà traités sont reconnus et sautés) */
   DEMANDES_JOURS: z.coerce.number().int().min(1).default(14),
+  /** Délai de traitement attendu, en jours ouvrés : une demande de devis (ou une demande affectée) à traiter au-delà est en retard */
+  DEMANDES_DELAI_JOURS: z.coerce.number().min(0.5).default(2),
   /** Application Microsoft Entra autorisée à lire la boîte (permission Mail.Read de type « Application ») */
   GRAPH_TENANT_ID: z.string().default(''),
   GRAPH_CLIENT_ID: z.string().default(''),

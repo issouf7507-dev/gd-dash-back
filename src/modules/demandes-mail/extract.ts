@@ -71,9 +71,6 @@ const REFERENCES: RegExp[] = [
 /** Formules qui marquent sans ambiguïté une demande de chiffrage ou de travaux */
 const DEMANDE_FORTE = /ordre de service|demande de devis|(?:[ée]tablir|faire|chiffrer|transmettre|adresser|envoyer|faire parvenir|proposer)\b[^.\n]{0,40}\bdevis|devis pour|chiffrage|bon de commande|merci d['’]intervenir|intervention urgente/i
 
-/** Le client demande un chiffrage (pas encore de travaux commandés) */
-const DEMANDE_DEVIS = /demande de devis|(?:[ée]tablir|faire|chiffrer|transmettre|adresser|envoyer|faire parvenir|proposer)\b[^.\n]{0,40}\bdevis|devis pour|chiffrage/i
-
 /** Le client demande qu'on passe sur place : dépannage, urgence, ordre de service, sinistre… */
 const DEMANDE_INTERVENTION =
   /ordre de service|bon d['’]intervention|merci d['’]intervenir|\bintervenir\b|\binterventions?\b|d[ée]pann|r[ée]paration|\bfuites?\b|infiltrations?|d[ée]g[aâ]ts? des eaux|sinistre|\burgen(?:t|te|ts|tes|ce)\b|recherche de fuite|b[aâ]chage|mise en s[ée]curit[ée]|engorg|bouch[ée]e?s?\b|tuiles? (?:tomb|cass|envol|d[ée]plac)|passer (?:sur place|voir|constater)/i
@@ -88,17 +85,112 @@ const PAIEMENT =
 /** Facture citée : moins fort qu'un paiement, un ordre de service parle souvent de « votre facture » */
 const FACTURE = /\bfacture\s*n[°o]|\bFGD\d{2}-\d+|situation (?:de travaux|n[°o])|\bavoir n[°o]|duplicata|relev[ée] de compte|(?:ci-joint|vous trouverez)[^.\n]{0,30}\bfacture/i
 
+/** Début de l'historique cité sous une réponse ou un transfert (« De : … », « Le … a écrit : », trait de séparation d'Outlook) */
+const HISTORIQUE = /_{8,}|^\s*(?:de|from|exp[ée]diteur)\s*:|^\s*-{3,}\s*(?:message d['’]origine|original message|forwarded message)|^\s*(?:le|on) .{5,120}(?:a [ée]crit|wrote)\s*:/im
+
+/** Le dernier message seul : l'historique cité parle souvent d'autre chose (facture, chantier…) que ce qui est demandé. */
+export function sansHistorique(corps: string): string {
+  const m = HISTORIQUE.exec(corps)
+  return m ? corps.slice(0, m.index) : corps
+}
+
+/** Objet d'une demande de chiffrage : « Demande de devis n° … », relance, devis concurrentiel, devis à actualiser, demande de proposition… */
+const OBJET_DEVIS =
+  /d(?:eman)?de (?:de |d\s?['’]\s?un |du )?devis|devis concurrentiels?|demande (?:de |d['’]une )?proposition|demande d['’]offre|actualisation (?:du |de |des )?devis|mise [àa] jour (?:du |de |des )?devis|consultation d['’]entreprises|d(?:eman)?de de chiffrage|d(?:eman)?de de visite\b[^\n]{0,30}\b(?:audit|devis|chiffrage)|demande d['’]audit/i
+/** Objet d'un devis déjà accepté ou refusé : c'est la suite d'un devis (ordre de service, acompte…), plus une demande de chiffrage */
+const DEVIS_TRANCHE = /accord (?:sur )?(?:votre |le |du |de )?devis|devis (?:sign[ée]|valid[ée]|accept[ée]|refus[ée])|validation (?:du |de |de votre )?devis|bon pour accord|\bBPA\b|refus du devis/i
+
+const VERBE_DEVIS = String.raw`(?:[ée]tablir|faire|refaire|chiffrer|transmettre|retransmettre|adresser|envoyer|renvoyer|faire parvenir|communiquer|proposer|r[ée]aliser|compl[ée]ter|modifier|corriger|actualiser|r[ée]actualiser|mettre [àa] jour|obtenir)`
+/** Le client demande un chiffrage, une relance ou une modification de devis (pas encore de travaux commandés) */
+const DEMANDE_DEVIS = new RegExp(
+  String.raw`demande (?:de |d['’]un |du )?devis|${VERBE_DEVIS}\b[^.\n?]{0,60}\b(?:devis|proposition)|(?:attente|attendons|attends|pas (?:encore )?re[çc]u)\b[^.\n]{0,25}\bdevis|second devis|(?:demande|besoin|faire|r[ée]aliser|effectuer|[ée]tablir|transmettre|envoyer|obtenir) (?:de |d['’]un |un |le |votre )?chiffrage|(?:pouvez|pourriez|pourrez|merci de|afin de)\b[^.?\n]{0,40}\bchiffrer|mettre en option|demande de proposition|(?:m['’]|nous )(?:indiquer|communiquer)\b[^.?\n]{0,20}\b(?:tarif|prix|co[ûu]t)\b|quel (?:est|serait|sera) (?:le |votre )?(?:tarif|prix|co[ûu]t)|second avis|\bun prospect\b|message via le site`,
+  'i',
+)
+
+/** Devis demandé quelque part dans le mail, historique compris (moins sûr : départage seulement intervention et devis) */
+const DEVIS_CITE = /demande de devis|(?:[ée]tablir|faire|chiffrer|transmettre|adresser|envoyer|faire parvenir|proposer)\b[^.\n]{0,40}\bdevis|devis pour|chiffrage/i
+
 /**
- * Boîte du mail. Un paiement l'emporte ; puis le vocabulaire de gros chantier ; un ordre de service commande des travaux ;
- * une facture citée va en facturation ; sinon une demande de chiffrage explicite reste un devis.
+ * Le mail demande un devis : objet de demande de chiffrage, ou demande écrite dans le dernier message (pas dans l'historique cité).
+ * Un mail sur un devis déjà accepté ou refusé n'en est pas une.
  */
-export function boiteDe(texte: string): Boite {
-  if (PAIEMENT.test(texte)) return 'Facture'
-  if (GROS_CHANTIER.test(texte)) return 'Chantier'
-  if (/ordre de service|bon d['’]intervention/i.test(texte)) return 'Intervention'
-  if (FACTURE.test(texte)) return 'Facture'
-  if (DEMANDE_DEVIS.test(texte)) return 'Devis'
-  return DEMANDE_INTERVENTION.test(texte) ? 'Intervention' : 'Devis'
+export function estDemandeDeDevis(objet: string, corps: string): boolean {
+  if (DEVIS_TRANCHE.test(objet)) return false
+  return OBJET_DEVIS.test(objet) || DEMANDE_DEVIS.test([objet, sansHistorique(corps)].join('\n'))
+}
+
+/** Outils de GD : notifications internes (« Devis validé », relances) et logiciel de devis qui envoie les devis aux clients */
+const OUTIL_GD = /^(?:gd\.couv@gmail\.com|no-reply@solutionsbtp\.fr)$/i
+
+/**
+ * Mail affiché dans la rubrique « Demandes de devis » : une demande de devis écrite par un client.
+ * Les réponses de GD ne comptent pas, sauf un transfert par un collègue (« TR : demande de devis »).
+ */
+export function estMailDeDemandeDevis(objet: string, corps: string, expediteur: string): boolean {
+  if (OUTIL_GD.test(expediteur)) return false
+  if (DOMAINE_GD.test(expediteur) && !/^\s*(?:tr|fw|fwd)\s*:/i.test(objet)) return false
+  return estDemandeDeDevis(objet, corps)
+}
+
+/** N° de devis GD cité (« DGD26-0890 », « DGD26-0878/2 », « AO-DGD26-0519 », « DGDP-260067 ») */
+const NUMERO_DEVIS_GD = /\b(?:AO-)?DGDP?\d{0,2}-\d{3,6}(?:[/-]\d{1,2})?\b/gi
+
+/** N° de devis GD cités dans un texte (en majuscules, sans doublon) */
+export const numerosDevisCites = (texte: string) => [...new Set((texte.match(NUMERO_DEVIS_GD) ?? []).map((n) => n.toUpperCase()))]
+/** Le client accepte le devis */
+const DEVIS_ACCEPTE =
+  /accord (?:sur|pour) (?:votre |le |notre |ce |du )?devis|bon pour accord|\bBPA\b|devis (?:ci-joint )?(?:sign[ée]|accept[ée]|valid[ée])|(?:validons|acceptons|avons valid[ée]|avons accept[ée]|avons sign[ée])\b[^.\n]{0,20}\bdevis|nous avons l['’]accord|(?:accord|validation) du (?:conseil syndical|CS)\b[^.\n]{0,40}\bdevis/i
+/** Le client refuse le devis ou n'y donne pas suite */
+const DEVIS_REFUSE =
+  /refus (?:du|de votre|de ce) devis|devis (?:refus[ée]|non retenu)|(?:n['’]avons|n['’]a|n['’]ont) pas (?:retenu|valid[ée]|accept[ée])|ne (?:donnerons|donnera|donneront|pouvons) pas (?:donner )?suite|(?:autre|une) entreprise (?:a été |est )?retenue|ne (?:sommes|sont) pas retenu/i
+
+export interface ResultatLu {
+  resultat: 'Accepté' | 'Refusé'
+  /** N° de devis GD cités dans l'objet ou le dernier message, à défaut dans l'historique cité (souvent le mail d'envoi du devis) */
+  numeros: string[]
+  /** Phrase du refus (motif affiché sur le devis) */
+  motif: string | null
+}
+
+/**
+ * Accord ou refus d'un devis écrit par le client, lu dans l'objet et le dernier message (pas dans l'historique cité).
+ * Les mails de GD (réponses, notifications « Devis validé » de l'outil interne) ne comptent pas.
+ */
+export function resultatDevisDans(objet: string, corps: string, expediteur: string): ResultatLu | null {
+  if (OUTIL_GD.test(expediteur) || DOMAINE_GD.test(expediteur)) return null
+  const message = [objet, sansHistorique(corps)].join('\n')
+  const refus = DEVIS_REFUSE.exec(message)
+  const accord = refus ? null : DEVIS_ACCEPTE.exec(message)
+  if (!refus && !accord) return null
+  const cites = numerosDevisCites(message)
+  const numeros = cites.length ? cites : numerosDevisCites([objet, corps].join('\n'))
+  let motif: string | null = null
+  if (refus) {
+    // La phrase qui contient le refus
+    const debut = Math.max(message.lastIndexOf('.', refus.index) + 1, message.lastIndexOf('\n', refus.index) + 1)
+    const fin = message.slice(refus.index).search(/[.\n]/)
+    motif = message.slice(debut, fin < 0 ? undefined : refus.index + fin + 1).replace(/\s+/g, ' ').trim().slice(0, 500) || null
+  }
+  return { resultat: refus ? 'Refusé' : 'Accepté', numeros, motif }
+}
+
+/**
+ * Boîte du mail (`texte` : l'objet sur la première ligne, puis le corps). Un paiement l'emporte ; puis une demande de devis
+ * (lue dans l'objet et le dernier message, l'historique cité et les signatures parlant souvent de chantier ou de facture) ;
+ * puis le vocabulaire de gros chantier ; un ordre de service commande des travaux ; une facture citée va en facturation.
+ */
+export function boiteDe(texte: string, textePdf = ''): Boite {
+  const [objet = '', ...reste] = texte.split('\n')
+  const corps = reste.join('\n')
+  const tout = [texte, textePdf].join('\n')
+  if (PAIEMENT.test([objet, sansHistorique(corps)].join('\n'))) return 'Facture'
+  if (estDemandeDeDevis(objet, corps)) return 'Devis'
+  if (PAIEMENT.test(tout)) return 'Facture'
+  if (GROS_CHANTIER.test(tout)) return 'Chantier'
+  if (/ordre de service|bon d['’]intervention/i.test(tout)) return 'Intervention'
+  if (FACTURE.test(tout)) return 'Facture'
+  if (DEVIS_CITE.test(tout)) return 'Devis'
+  return DEMANDE_INTERVENTION.test(tout) ? 'Intervention' : 'Devis'
 }
 
 /** Candidature : CV en pièce jointe, ou mail qui parle de CV / candidature */
@@ -145,6 +237,18 @@ const ADMINISTRATIF =
 const PUBLICITE =
   /se d[ée]sabonner|d[ée]sinscri(?:re|ption|vez)|unsubscribe|newsletter|webinaire|webinar|offre promotionnelle|promotions? du mois|voir (?:la )?version en ligne|ne plus recevoir (?:nos|ces) (?:e-?mails|messages|offres)/i
 
+/** N° de bon de commande de GD dans l'objet (« commande n° BC-2611089 ») */
+const NUMERO_BC = /\bBC-?\d{5,}\b/i
+/** Bon de commande envoyé par GD (logiciel de devis ou collègue) */
+const ENVOI_GD = /@gdcouverture\.(?:fr|com)$|^no-reply@solutionsbtp\.fr$/i
+
+/** Bon de commande de GD : n° BC dans l'objet, ou bon de commande transmis par GD dans le dernier message. */
+function estBonDeCommande(m: MailARanger): boolean {
+  const [objet = '', ...reste] = m.texte.split('\n')
+  if (NUMERO_BC.test(objet)) return true
+  return ENVOI_GD.test(m.expediteur) && /\bbons? de commande\b|\bnotre commande n[°o]/i.test(sansHistorique(reste.join('\n')))
+}
+
 /** Dossiers remplis automatiquement, dans l'ordre où ils sont essayés (le premier qui correspond l'emporte). */
 export const DOSSIERS_AUTO: (DossierAuto & { correspond: (m: MailARanger) => boolean })[] = [
   {
@@ -152,6 +256,14 @@ export const DOSSIERS_AUTO: (DossierAuto & { correspond: (m: MailARanger) => boo
     motif: 'Candidature (CV) : rangée dans le dossier CV',
     ecarter: true,
     correspond: (m) => ressembleACv(m.texte, m.nomsPieces, m.textePdf),
+  },
+  // Bons de commande de GD (« Confirmation prise en charge commande n° BC-2611089 », réponses des fournisseurs,
+  // bon de commande transmis à un sous-traitant) : avant Fournisseurs, pour réunir la commande et ses réponses
+  {
+    nom: 'Bons de commande (BC)',
+    motif: 'Bon de commande : rangé dans le dossier Bons de commande (BC)',
+    ecarter: true,
+    correspond: (m) => estBonDeCommande(m),
   },
   // Assurances et marchés publics peuvent mener à des travaux : rangés mais gardés « À traiter »
   { nom: 'Assurances / sinistres', motif: 'Rangé dans le dossier Assurances / sinistres', ecarter: false, correspond: (m) => ASSURANCE.test(m.texte) },
@@ -168,10 +280,26 @@ export const DOSSIERS_AUTO: (DossierAuto & { correspond: (m: MailARanger) => boo
   },
 ]
 
-/** Dossier automatique du mail (null : aucun). */
+/** Réponse ou transfert : un échange avec un correspondant, pas un envoi en nombre */
+const REPONSE = /^\s*(?:re|tr|fw|fwd|rép|réf)\s*:/i
+
+/**
+ * Une vraie demande de devis n'est pas écartée par le pied de mail (« se désabonner » d'un outil de messagerie,
+ * « sous-traitance », URSSAF…) : une publicité ne compte que si le mail est une réponse ou un transfert.
+ * Les candidatures et les négoces restent écartés.
+ */
+function demandeDeDevisAGarder(d: DossierAuto, m: MailARanger): boolean {
+  if (!d.ecarter || d.nom === 'CV' || NEGOCES.test(m.expediteur)) return false
+  const [objet = '', ...reste] = m.texte.split('\n')
+  if (d.nom === 'Publicité / newsletters' && !REPONSE.test(objet)) return false
+  return estDemandeDeDevis(objet, reste.join('\n'))
+}
+
+/** Dossier automatique du mail (null : aucun). `texte` : l'objet sur la première ligne, puis le corps. */
 export function dossierAutoDe(m: MailARanger): DossierAuto | null {
   const d = DOSSIERS_AUTO.find((x) => x.correspond(m))
-  return d ? { nom: d.nom, motif: d.motif, ecarter: d.ecarter } : null
+  if (!d || demandeDeDevisAGarder(d, m)) return null
+  return { nom: d.nom, motif: d.motif, ecarter: d.ecarter }
 }
 
 /** Lignes qui terminent le descriptif (formules de politesse, observations, transferts…) */
@@ -310,9 +438,11 @@ export function extraireDemande(mail: MailLu): ExtractionDemande {
   // « GD Couverture » (en-tête des PDF, destinataires) ne dit rien du métier demandé
   const { categorie, incertaine } = detecterCategorie([mail.objet, descriptif ?? '', ...pdf].join('\n').replace(/gd\s*couverture/gi, ''))
 
-  const boite = boiteDe(tout)
+  const boite = boiteDe([mail.objet, mail.corps].join('\n'), mail.textePdf)
   // Tout ce qui ressemble à une intervention ou à un gros chantier est gardé, même sans métier reconnu
-  const estUneDemande = DEMANDE_FORTE.test(tout) || (/\b(?:devis|intervention|intervenir|travaux)\b/i.test(tout) && categorie !== null) || boite !== 'Devis'
+  const estUneDemande =
+    DEMANDE_FORTE.test(tout) ||
+    estDemandeDeDevis(mail.objet, mail.corps) || (/\b(?:devis|intervention|intervenir|travaux)\b/i.test(tout) && categorie !== null) || boite !== 'Devis'
 
   return {
     estUneDemande,

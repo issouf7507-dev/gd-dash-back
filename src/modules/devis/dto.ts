@@ -1,5 +1,5 @@
 import type { Devis } from '../../generated/prisma/client.ts'
-import { categorie, planification, relanceDevis, statutADCI, statutConducteur } from '../../lib/labels.ts'
+import { categorie, planification, relanceDevis, resultatDevis, statutADCI, statutConducteur } from '../../lib/labels.ts'
 
 const isoDate = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null)
 
@@ -23,5 +23,9 @@ export function toDevisDto(d: Devis) {
     commentaires: d.commentaires,
     montantHT: d.montantHT === null ? null : Number(d.montantHT),
     source: d.source === 'MAIL' ? ('Mail' as const) : ('Saisie' as const),
+    resultat: resultatDevis.label(d.resultat),
+    resultatLe: isoDate(d.resultatLe),
+    motifRefus: d.motifRefus,
+    resultatMailId: d.resultatMailId,
   }
 }

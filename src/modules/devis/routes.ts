@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { Prisma } from '../../generated/prisma/client.ts'
 import { ConflictError, NotFoundError, ValidationError } from '../../lib/app-error.ts'
-import { Role } from '../../lib/labels.ts'
+import { resultatDevis, Role } from '../../lib/labels.ts'
 import { isUniqueViolation } from '../../lib/prisma-errors.ts'
 import { prisma } from '../../lib/prisma.ts'
 import { ok } from '../../lib/response.ts'
@@ -56,8 +56,16 @@ devisRouter.post('/', canWrite, validate({ body: devisSchema }), async (_req, re
 
 devisRouter.patch('/:id', canWrite, validate({ params: idParams, body: devisSchema.partial() }), async (_req, res) => {
   const id = res.locals.params.id as string
-  if (!(await prisma.devis.findUnique({ where: { id }, select: { id: true } }))) throw new NotFoundError('Devis introuvable')
-  const d = await prisma.devis.update({ where: { id }, data: toDevisData(res.locals.body as Partial<DevisInput>) }).catch(mapError)
+  const actuel = await prisma.devis.findUnique({ where: { id }, select: { resultat: true } })
+  if (!actuel) throw new NotFoundError('Devis introuvable')
+  const body = { ...(res.locals.body as Partial<DevisInput>) }
+  // Le formulaire renvoie la réponse du client sans la changer : on garde alors celle lue dans le mail (date, motif, lien)
+  if (body.resultat !== undefined && resultatDevis.key(body.resultat) === actuel.resultat) {
+    delete body.resultat
+    delete body.resultatLe
+    delete body.motifRefus
+  }
+  const d = await prisma.devis.update({ where: { id }, data: toDevisData(body) }).catch(mapError)
   ok(res, toDevisDto(d))
 })
 

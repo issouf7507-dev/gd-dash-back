@@ -1,7 +1,7 @@
-import { CATEGORIES, PLANIFICATIONS, RELANCES_DEVIS, STATUTS_ADCI, STATUTS_CONDUCTEUR } from '@gd/shared/types'
+import { CATEGORIES, PLANIFICATIONS, RELANCES_DEVIS, RESULTATS_DEVIS, STATUTS_ADCI, STATUTS_CONDUCTEUR } from '@gd/shared/types'
 import { z } from 'zod'
 import type { Prisma } from '../../generated/prisma/client.ts'
-import { categorie, planification, relanceDevis, statutADCI, statutConducteur } from '../../lib/labels.ts'
+import { categorie, planification, relanceDevis, resultatDevis, statutADCI, statutConducteur } from '../../lib/labels.ts'
 
 const date = z.iso.date().nullable()
 const texte = (max: number) => z.string().trim().max(max)
@@ -23,10 +23,35 @@ export const devisSchema = z.object({
   relance: z.enum(RELANCES_DEVIS).nullable().default(null),
   commentaires: texte(10_000).default(''),
   montantHT: z.number().nonnegative().max(9_999_999_999).nullable().default(null),
+  resultat: z.enum(RESULTATS_DEVIS).default('En attente'),
+  resultatLe: date.default(null),
+  motifRefus: texte(500).nullable().default(null),
 })
 export type DevisInput = z.infer<typeof devisSchema>
 
 const toDate = (d: string | null | undefined) => (d === undefined ? undefined : d === null ? null : new Date(`${d}T00:00:00Z`))
+
+const aujourdhui = () => new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`)
+
+/**
+ * Réponse du client saisie à la main : elle remplace celle lue dans un mail (le lien au mail est retiré).
+ * Date du jour par défaut ; plus de date ni de motif quand le devis repasse « En attente ».
+ */
+function resultatData(v: Partial<DevisInput>, creation: boolean) {
+  if (v.resultat === undefined) {
+    return {
+      ...(v.resultatLe !== undefined && { resultatLe: toDate(v.resultatLe) }),
+      ...(v.motifRefus !== undefined && { motifRefus: v.motifRefus || null }),
+    }
+  }
+  const enAttente = v.resultat === 'En attente'
+  return {
+    resultat: resultatDevis.key(v.resultat),
+    resultatLe: enAttente ? null : (toDate(v.resultatLe) ?? aujourdhui()),
+    motifRefus: v.resultat === 'Refusé' ? v.motifRefus || null : null,
+    ...(!creation && { resultatMail: { disconnect: true } }),
+  }
+}
 
 /** Libellés → valeurs Prisma (n'inclut que les champs présents, pour PATCH). */
 export function toDevisData(input: Partial<DevisInput>, creation = false) {
@@ -47,6 +72,7 @@ export function toDevisData(input: Partial<DevisInput>, creation = false) {
     ...(v.relance !== undefined && { relance: v.relance && relanceDevis.key(v.relance) }),
     ...(v.commentaires !== undefined && { commentaires: v.commentaires }),
     ...(v.montantHT !== undefined && { montantHT: v.montantHT }),
+    ...resultatData(v, creation),
   } satisfies Prisma.DevisUpdateInput
 }
 

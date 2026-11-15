@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { env } from '../../config/env.ts'
-import { BoiteDemande, Prisma, SourceDevis, StatutDemande } from '../../generated/prisma/client.ts'
+import { BoiteDemande, Prisma, ResultatDevis, SourceDevis, StatutDemande } from '../../generated/prisma/client.ts'
 import { ConflictError } from '../../lib/app-error.ts'
 import { logger } from '../../lib/logger.ts'
 import { isUniqueViolation } from '../../lib/prisma-errors.ts'
@@ -19,7 +19,7 @@ import type { Rapprochement } from '../import-mail/match-client.ts'
 import { sourceDossier } from '../import-mail/sources/dossier.ts'
 import { sourceGraph } from '../import-mail/sources/graph.ts'
 import type { Progression, SourceMails } from '../import-mail/sources/types.ts'
-import { boiteDe, DOSSIERS_AUTO, dossierAutoDe, extraireDemande, rapprocherClientDemande, type ChampsDemande, type ReglementLu } from './extract.ts'
+import { boiteDe, DOSSIERS_AUTO, dossierAutoDe, estMailDeDemandeDevis, extraireDemande, numerosDevisCites, resultatDevisDans, rapprocherClientDemande, type ChampsDemande, type ReglementLu } from './extract.ts'
 import { emailDe, rattacherAuFil } from './fils.ts'
 
 /** Contenu de la colonne `donnees` d'une demande. */
@@ -32,6 +32,8 @@ export interface DonneesDemande {
   reglement?: ReglementLu
   /** Dossier automatique où le mail a été rangé une fois (il n'y est pas remis s'il en est sorti à la main) */
   dossierAuto?: string
+  /** Demande de devis écrite par un client : affichée dans la rubrique « Demandes de devis » */
+  demandeDevis?: boolean
 }
 
 /** Contenu de la colonne `pieces`. */
@@ -276,6 +278,7 @@ export async function traiterMail(brut: Buffer, ref: string): Promise<ResultatTr
     textePdf: mail.textePdf,
   })
   if (auto) donnees.dossierAuto = auto.nom
+  if (!auto?.ecarter && estMailDeDemandeDevis(mail.objet, mail.corps, mail.expediteur.email)) donnees.demandeDevis = true
   const ecarte = !!auto?.ecarter
   let statut: StatutDemande = StatutDemande.A_TRAITER
   let anomalies: string[]
@@ -325,6 +328,8 @@ export async function traiterMail(brut: Buffer, ref: string): Promise<ResultatTr
   }
   // Le mail est enregistré : un échec du regroupement ne doit pas le faire retraiter
   await rattacherAuFil(id).catch((err) => logger.warn({ err, id }, 'demandes mail : rattachement au fil impossible'))
+  // Accord ou refus d'un devis écrit par le client : reporté sur le devis
+  await appliquerResultatDevis(id).catch((err) => logger.warn({ err, id }, 'demandes mail : lecture de la réponse au devis impossible'))
   return statut === StatutDemande.IGNOREE ? 'ignorée' : 'à traiter'
 }
 
@@ -476,4 +481,122 @@ export async function rangerDossiersAuto() {
     comptes[auto.nom] = (comptes[auto.nom] ?? 0) + 1
   }
   if (Object.keys(comptes).length) logger.info(comptes, 'demandes mail : anciens mails rangés dans les dossiers automatiques')
+}
+
+/**
+ * Marque les demandes de devis parmi les mails déjà reçus (rubrique « Demandes de devis »), d'après les règles actuelles.
+ * Ne change ni la boîte, ni le statut, ni le dossier ; un mail écarté automatiquement (CV, publicité…) n'est pas marqué.
+ */
+export async function marquerDemandesDevis() {
+  let curseur: string | undefined
+  let modifies = 0
+  for (;;) {
+    const lot = await prisma.demandeMail.findMany({
+      take: 200,
+      ...(curseur && { skip: 1, cursor: { id: curseur } }),
+      orderBy: { id: 'asc' },
+      select: { id: true, objet: true, corps: true, expediteur: true, statut: true, traiteParId: true, donnees: true },
+    })
+    if (lot.length === 0) break
+    curseur = lot[lot.length - 1].id
+    for (const m of lot) {
+      const donnees = (m.donnees ?? {}) as Partial<DonneesDemande>
+      const ecarte = m.statut === StatutDemande.IGNOREE && !m.traiteParId && !!donnees.dossierAuto
+      const demandeDevis = !ecarte && estMailDeDemandeDevis(m.objet, m.corps, emailDe(m.expediteur))
+      if (!!donnees.demandeDevis === demandeDevis) continue
+      await prisma.demandeMail.update({ where: { id: m.id }, data: { donnees: { ...donnees, demandeDevis } as unknown as Prisma.InputJsonValue } })
+      modifies++
+    }
+  }
+  if (modifies) logger.info({ modifies }, 'demandes mail : demandes de devis marquées')
+}
+
+// ─── Réponse du client au devis (accord, refus) ─────────────────
+
+/** Devis portant ce n° : le n° exact, sinon la dernière version (« DGD26-0878 » → « DGD26-0878/2 »). */
+async function devisDuNumero(numero: string): Promise<string | null> {
+  const base = numero.replace(/(-\d{3,6})[/-]\d{1,2}$/, '$1')
+  const candidats = await prisma.devis.findMany({
+    where: { OR: [{ numero }, { numero: base }, { numero: { startsWith: `${base}/` } }, { numero: { startsWith: `${base}-` } }] },
+    select: { id: true, numero: true },
+    orderBy: { numero: 'desc' },
+  })
+  return (candidats.find((d) => d.numero.toUpperCase() === numero) ?? candidats[0])?.id ?? null
+}
+
+/**
+ * Devis dont parle le mail : n° de devis GD qu'il cite ; sinon le devis auquel il a été lié ; sinon n° cité ou devis lié dans un autre mail du même fil
+ * (le mail d'envoi du devis, la demande d'origine) ; sinon devis créé depuis une demande de même référence client.
+ * Rien si plusieurs devis sont possibles.
+ */
+async function devisDuMail(m: { id: string; devisId: string | null; filId: string | null; donnees: Prisma.JsonValue }, numeros: string[]): Promise<string | null> {
+  const uniques = (ids: (string | null)[]) => [...new Set(ids.filter((x): x is string => !!x))]
+  const parNumeros = async (ns: string[]) => uniques(await Promise.all(ns.map(devisDuNumero)))
+
+  const cites = await parNumeros(numeros)
+  if (cites.length) return cites.length === 1 ? cites[0] : null
+  // Mail lié à la main à son devis (« Lier à un devis »)
+  if (m.devisId) return m.devisId
+
+  if (m.filId) {
+    const fil = await prisma.demandeMail.findMany({ where: { filId: m.filId, id: { not: m.id } }, select: { devisId: true, objet: true, corps: true } })
+    const lies = uniques(fil.map((f) => f.devisId))
+    if (lies.length) return lies.length === 1 ? lies[0] : null
+    const duFil = await parNumeros(numerosDevisCites(fil.map((f) => [f.objet, f.corps].join('\n')).join('\n')))
+    if (duFil.length) return duFil.length === 1 ? duFil[0] : null
+  }
+
+  const reference = (m.donnees as Partial<DonneesDemande> | null)?.champs?.reference
+  if (reference) {
+    const memeRef = await prisma.demandeMail.findMany({
+      where: { id: { not: m.id }, devisId: { not: null }, donnees: { path: '$.champs.reference', equals: reference } },
+      select: { devisId: true },
+    })
+    const ids = uniques(memeRef.map((d) => d.devisId))
+    if (ids.length === 1) return ids[0]
+  }
+  return null
+}
+
+/**
+ * Lit dans le mail l'accord ou le refus du client, et le reporte sur le devis concerné.
+ * Une réponse saisie à la main n'est jamais remplacée ; une réponse lue dans un mail plus ancien l'est.
+ * Renvoie le n° du devis mis à jour (null : rien de fait).
+ */
+export async function appliquerResultatDevis(id: string): Promise<string | null> {
+  const m = await prisma.demandeMail.findUnique({ where: { id }, select: { id: true, objet: true, corps: true, expediteur: true, recuLe: true, devisId: true, filId: true, donnees: true } })
+  if (!m) return null
+  const lu = resultatDevisDans(m.objet, m.corps, emailDe(m.expediteur))
+  if (!lu) return null
+  const devisId = await devisDuMail(m, lu.numeros)
+  if (!devisId) return null
+  const devis = await prisma.devis.findUniqueOrThrow({
+    where: { id: devisId },
+    select: { numero: true, resultat: true, resultatMailId: true, resultatMail: { select: { recuLe: true } } },
+  })
+  if (devis.resultatMailId === m.id) return null
+  const saisieALaMain = devis.resultat !== ResultatDevis.EN_ATTENTE && !devis.resultatMailId
+  if (saisieALaMain || (devis.resultatMail && devis.resultatMail.recuLe > m.recuLe)) return null
+  await prisma.devis.update({
+    where: { id: devisId },
+    data: {
+      resultat: lu.resultat === 'Accepté' ? ResultatDevis.ACCEPTE : ResultatDevis.REFUSE,
+      resultatLe: new Date(`${m.recuLe.toISOString().slice(0, 10)}T00:00:00Z`),
+      motifRefus: lu.motif,
+      resultatMailId: m.id,
+    },
+  })
+  return devis.numero
+}
+
+/** Relit les réponses aux devis dans les mails déjà reçus (au démarrage), du plus ancien au plus récent. */
+export async function lireResultatsDevis() {
+  const mails = await prisma.demandeMail.findMany({ select: { id: true, objet: true, corps: true, expediteur: true }, orderBy: { recuLe: 'asc' } })
+  const maj: string[] = []
+  for (const m of mails) {
+    if (!resultatDevisDans(m.objet, m.corps, emailDe(m.expediteur))) continue
+    const numero = await appliquerResultatDevis(m.id)
+    if (numero) maj.push(numero)
+  }
+  if (maj.length) logger.info({ devis: maj }, 'demandes mail : réponses des clients reportées sur les devis')
 }
