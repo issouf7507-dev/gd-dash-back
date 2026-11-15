@@ -172,13 +172,16 @@ const aTraiter = async (userId: string) => {
  * ?dossier=devis : les seules demandes de devis écrites par des clients, toutes boîtes confondues (rubrique « Demandes de devis ») ;
  * ?dossier=moi : les demandes affectées à la personne connectée ; ?dossier=pour:<id> : celles affectées à cette personne ;
  * ?dossier=retard : les demandes de devis et demandes affectées encore à traiter au-delà du délai attendu, toutes boîtes confondues.
+ * ?client=<id> : les mails reconnus comme venant de ce client, toutes boîtes confondues (fiche client).
  * Hors Direction, Admin et ADCI : toujours les seules demandes affectées à la personne.
  */
-const listeQuery = z.object({ dossier: z.string().min(1).optional(), boite: z.enum(BOITES).default('Devis') })
+const listeQuery = z.object({ dossier: z.string().min(1).optional(), boite: z.enum(BOITES).default('Devis'), client: z.string().min(1).optional() })
 demandesDevisRouter.get('/', validate({ query: listeQuery }), async (_req, res) => {
   const user = res.locals.user!
   // Hors gestion, on ne voit que ses demandes, toutes boîtes confondues
-  const { dossier, boite } = gereLesDemandes(user.role) ? (res.locals.query as z.infer<typeof listeQuery>) : { dossier: MES_DEMANDES, boite: 'Devis' as const }
+  const { dossier, boite, client } = gereLesDemandes(user.role)
+    ? (res.locals.query as z.infer<typeof listeQuery>)
+    : { dossier: MES_DEMANDES, boite: 'Devis' as const, client: undefined }
   const pour = dossier?.startsWith(POUR) ? dossier.slice(POUR.length) : dossier === MES_DEMANDES ? user.id : null
   const parDossier: Prisma.DemandeMailWhereInput = !dossier
     ? {}
@@ -192,8 +195,9 @@ demandesDevisRouter.get('/', validate({ query: listeQuery }), async (_req, res) 
             ? enRetard()
             : { dossierId: { in: sousArbre(await dossiersPlats(), dossier) } }
   // Demandes de devis, en retard et affectées : réunies quelle que soit leur boîte (un mail ancien a pu être rangé ailleurs)
-  const parBoite = dossier === DEMANDES_DEVIS || dossier === EN_RETARD || pour ? {} : dansBoite(boite)
-  const demandes = await prisma.demandeMail.findMany({ where: { AND: [parDossier, parBoite] }, orderBy: { recuLe: 'desc' }, take: 500 })
+  const parBoite = dossier === DEMANDES_DEVIS || dossier === EN_RETARD || pour || client ? {} : dansBoite(boite)
+  const parClient: Prisma.DemandeMailWhereInput = client ? { donnees: { path: '$.client.clientId', equals: client } } : {}
+  const demandes = await prisma.demandeMail.findMany({ where: { AND: [parDossier, parBoite, parClient] }, orderBy: { recuLe: 'desc' }, take: 500 })
   const maintenant = new Date()
   const limite = limiteRetard(maintenant)
   ok(res, demandes.map((d) => toDemandeDto(d, maintenant, limite)))
