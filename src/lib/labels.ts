@@ -28,6 +28,7 @@ import {
   StatutDemande,
   BoiteDemande,
   StatutImport,
+  TypeSuiviDevis,
   TypeClient,
   TypeIntervenant,
 } from '../generated/prisma/client.ts'
@@ -82,6 +83,13 @@ export const resultatDevis = mapping<ResultatDevis, 'En attente' | 'Accepté' | 
   ACCEPTE: 'Accepté',
   REFUSE: 'Refusé',
   SANS_SUITE: 'Sans suite',
+})
+export const typeSuiviDevis = mapping<TypeSuiviDevis, 'Validation demandée' | 'Validé' | 'Validation refusée' | 'Envoyé au client' | 'Relance'>({
+  DEMANDE_VALIDATION: 'Validation demandée',
+  VALIDE: 'Validé',
+  VALIDATION_REFUSEE: 'Validation refusée',
+  ENVOYE: 'Envoyé au client',
+  RELANCE: 'Relance',
 })
 export const statutImport = mapping<StatutImport, 'À vérifier' | 'Importé' | 'Ignoré' | 'Erreur'>({
   A_VERIFIER: 'À vérifier',

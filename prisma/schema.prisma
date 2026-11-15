@@ -59,6 +59,15 @@ enum ResultatDevis {
   SANS_SUITE @map("Sans suite")
 }
 
+/// Étapes du suivi d'un devis
+enum TypeSuiviDevis {
+  DEMANDE_VALIDATION @map("Validation demandée")
+  VALIDE             @map("Validé")
+  VALIDATION_REFUSEE @map("Validation refusée")
+  ENVOYE             @map("Envoyé au client")
+  RELANCE            @map("Relance")
+}
+
 enum RelanceDevis {
   OUI
   NON
@@ -166,6 +175,8 @@ model Utilisateur {
   chantiersCharges  Chantier[]    @relation("ChantierChargeAffaires")
   observations      Observation[]
   relancesEnvoyees  Relance[]
+  devisValides      Devis[]       @relation("DevisValidePar")
+  suivisDevis       SuiviDevis[]
   jetons            JetonAuth[]
   auditLogs         AuditLog[]
   importsTraites    ImportMail[]  @relation("ImportTraitePar")
@@ -260,6 +271,14 @@ model Devis {
   /// Mail du client d'où la réponse a été lue (null : saisie à la main)
   resultatMailId   String?
   resultatMail     DemandeMail?      @relation("ResultatDevisMail", fields: [resultatMailId], references: [id], onDelete: SetNull)
+  /// Validation interne (Direction ou Admin) : qui et quand
+  valideParId      String?
+  valideParUser    Utilisateur?      @relation("DevisValidePar", fields: [valideParId], references: [id], onDelete: SetNull)
+  valideLe         DateTime?
+  /// Date d'envoi au client : point de départ des relances
+  envoyeLe         DateTime?         @db.Date
+  /// Historique : demande de validation, validation, refus, envoi, relances
+  suivi            SuiviDevis[]
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
 
@@ -600,4 +619,25 @@ model DossierDemande {
 
   @@index([parentId])
   @@map("dossiers_demande")
+}
+
+/// Historique d'un devis : circuit de validation interne, envoi au client et relances
+model SuiviDevis {
+  id          String         @id @default(cuid())
+  devisId     String
+  devis       Devis          @relation(fields: [devisId], references: [id], onDelete: Cascade)
+  date        DateTime       @default(now())
+  type        TypeSuiviDevis
+  auteurId    String?
+  auteur      Utilisateur?   @relation(fields: [auteurId], references: [id], onDelete: SetNull)
+  /// Motif d'un refus de validation, remarque
+  commentaire String?        @db.Text
+  /// Relance : destinataire, objet, et si l'email est parti
+  email       String?        @db.VarChar(191)
+  objet       String?        @db.VarChar(255)
+  statutEnvoi StatutEnvoi?
+  erreur      String?        @db.Text
+
+  @@index([devisId])
+  @@map("suivis_devis")
 }
