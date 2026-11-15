@@ -2,20 +2,24 @@ import { Router } from 'express'
 import path from 'node:path'
 import { z } from 'zod'
 import { BoiteDemande, StatutDemande, type CategorieDemande, type DemandeMail, type Prisma } from '../../generated/prisma/client.ts'
-import { ConflictError, NotFoundError } from '../../lib/app-error.ts'
+import { ConflictError, ForbiddenError, NotFoundError } from '../../lib/app-error.ts'
+import { env } from '../../config/env.ts'
 import { boiteDemande, Role, statutDemande } from '../../lib/labels.ts'
 import { isUniqueViolation } from '../../lib/prisma-errors.ts'
 import { prisma } from '../../lib/prisma.ts'
 import { ok } from '../../lib/response.ts'
 import { requireAuth, requireRole } from '../../middleware/auth.ts'
+import type { NextFunction, Request, Response } from 'express'
 import { validate } from '../../middleware/validate.ts'
 import { toDevisDto } from '../devis/dto.ts'
 import { devisSchema, type DevisInput } from '../devis/schema.ts'
 import { chantierSchema, mapChantierError, toChantierDto, type ChantierInput } from '../chantiers/routes.ts'
 import { interventionSchema, mapInterventionError, toInterventionDto, type InterventionInput } from '../interventions/routes.ts'
+import { arrondi, enRetard, joursOuvres, limiteRetard } from './delais.ts'
 import { extraireReglement } from './extract.ts'
 import { mailsDuFil, regrouper, separer } from './fils.ts'
 import {
+  appliquerResultatDevis,
   chantierPropose,
   creerChantierDepuisDemande,
   creerDevisDepuisDemande,
@@ -33,7 +37,40 @@ import {
 } from './service.ts'
 
 export const demandesDevisRouter = Router()
-demandesDevisRouter.use(requireAuth, requireRole(Role.DIRECTION, Role.ADMIN, Role.ADCI))
+
+/** Rôles qui gèrent les mails reçus (relève, rangement, affectation) */
+const GESTION: Role[] = [Role.DIRECTION, Role.ADMIN, Role.ADCI]
+export const gereLesDemandes = (role: Role) => GESTION.includes(role)
+
+/** Chemins de l'API qui ne sont pas l'id d'une demande */
+const RESERVES = new Set(['etat', 'relever', 'categories', 'dossiers', 'fils', 'affecter'])
+/** Lectures communes ouvertes à tous (listes : filtrées sur les demandes affectées à la personne) */
+const LECTURES = new Set(['/', '/etat', '/categories', '/dossiers'])
+const LECTURE_DEMANDE = /^\/([^/]+)(?:\/pieces\/\d+)?$/
+const ACTION_DEMANDE = /^\/([^/]+)\/(?:creer-devis|lier|ignorer|reprendre)$/
+
+/**
+ * Direction, Admin et ADCI ont tout l'accès. Les autres ne voient que les demandes qui leur sont affectées :
+ * les lire, ouvrir leurs pièces jointes et les traiter (créer ou lier le devis, ignorer, reprendre).
+ */
+async function accesDemandes(req: Request, res: Response, next: NextFunction) {
+  const user = res.locals.user!
+  if (gereLesDemandes(user.role)) return next()
+  if (req.method === 'GET' && LECTURES.has(req.path)) return next()
+  const m = (req.method === 'GET' ? LECTURE_DEMANDE : req.method === 'POST' ? ACTION_DEMANDE : null)?.exec(req.path)
+  if (!m || RESERVES.has(m[1])) return next(new ForbiddenError())
+  try {
+    const d = await prisma.demandeMail.findUnique({ where: { id: m[1] }, select: { affecteAId: true } })
+    if (d && d.affecteAId !== user.id) return next(new ForbiddenError('Cette demande n’est pas affectée à vous'))
+    next()
+  } catch (err) {
+    next(err)
+  }
+}
+
+demandesDevisRouter.use(requireAuth, accesDemandes)
+/** Réservé à Direction, Admin et ADCI */
+const gestionSeulement = requireRole(...GESTION)
 
 const idParams = z.object({ id: z.string().min(1) })
 const BOITES = ['Devis', 'Intervention', 'Chantier', 'Facture'] as const
@@ -51,9 +88,21 @@ function verifierNonTraitee(d: DemandeMail) {
   if (d.statut === StatutDemande.FACTURE_RATTACHEE) throw new ConflictError('Ce mail est déjà rattaché à une facture')
 }
 
-function toDemandeDto(d: DemandeMail) {
+/** Délai écoulé (à traiter) ou délai de traitement (traitée), en jours ouvrés ; retard : demande suivie à traiter au-delà du délai attendu. */
+function delaiDe(d: DemandeMail, donnees: Partial<DonneesDemande>, maintenant: Date, limite: Date) {
+  const aTraiter = d.statut === StatutDemande.A_TRAITER
+  const suivie = !!donnees.demandeDevis || !!d.affecteAId
+  const fin = aTraiter ? maintenant : d.traiteLe
+  return {
+    delaiJours: fin ? arrondi(joursOuvres(d.recuLe, fin)) : null,
+    enRetard: aTraiter && suivie && d.recuLe < limite,
+  }
+}
+
+function toDemandeDto(d: DemandeMail, maintenant = new Date(), limite = limiteRetard(maintenant)) {
   const donnees = d.donnees as unknown as Partial<DonneesDemande>
   return {
+    ...delaiDe(d, donnees, maintenant, limite),
     id: d.id,
     recuLe: d.recuLe.toISOString(),
     expediteur: d.expediteur,
@@ -77,6 +126,8 @@ function toDemandeDto(d: DemandeMail) {
     erreur: d.erreur,
     devisId: d.devisId,
     traiteLe: d.traiteLe?.toISOString() ?? null,
+    affecteAId: d.affecteAId,
+    affecteLe: d.affecteLe?.toISOString() ?? null,
     categorieId: d.categorieId,
     dossierId: d.dossierId,
     // Les mails pas encore rattachés forment un fil à eux seuls
@@ -90,35 +141,97 @@ async function trouver(id: string) {
   return d
 }
 
-/** Demandes à traiter dans chaque boîte (pastilles du menu) */
-const aTraiter = async () => {
+/** Demandes à traiter dans chaque boîte (pastilles du menu), et celles affectées à la personne connectée */
+const aTraiter = async (userId: string) => {
   const compter = (boite: (typeof BOITES)[number]) => prisma.demandeMail.count({ where: { statut: StatutDemande.A_TRAITER, ...dansBoite(boite) } })
-  const [devis, interventions, chantiers, factures] = await Promise.all([compter('Devis'), compter('Intervention'), compter('Chantier'), compter('Facture')])
-  return { aTraiter: devis, aTraiterInterventions: interventions, aTraiterChantiers: chantiers, aTraiterFactures: factures }
+  const retard = enRetard()
+  const [devis, interventions, chantiers, factures, mesDemandes, retards, mesRetards] = await Promise.all([
+    compter('Devis'),
+    compter('Intervention'),
+    compter('Chantier'),
+    compter('Facture'),
+    prisma.demandeMail.count({ where: { statut: StatutDemande.A_TRAITER, affecteAId: userId } }),
+    prisma.demandeMail.count({ where: retard }),
+    prisma.demandeMail.count({ where: { AND: [retard, { affecteAId: userId }] } }),
+  ])
+  return {
+    aTraiter: devis,
+    aTraiterInterventions: interventions,
+    aTraiterChantiers: chantiers,
+    aTraiterFactures: factures,
+    mesDemandes,
+    enRetard: retards,
+    mesRetards,
+    delaiJours: env.DEMANDES_DELAI_JOURS,
+  }
 }
 
 /**
  * ?boite=Intervention : les demandes d'intervention (par défaut : les demandes de devis).
- * ?dossier=<id> : les demandes du dossier et de ses sous-dossiers ; ?dossier=aucun : celles qui ne sont dans aucun dossier.
+ * ?dossier=<id> : les demandes du dossier et de ses sous-dossiers ; ?dossier=aucun : celles qui ne sont dans aucun dossier ;
+ * ?dossier=devis : les seules demandes de devis écrites par des clients, toutes boîtes confondues (rubrique « Demandes de devis ») ;
+ * ?dossier=moi : les demandes affectées à la personne connectée ; ?dossier=pour:<id> : celles affectées à cette personne ;
+ * ?dossier=retard : les demandes de devis et demandes affectées encore à traiter au-delà du délai attendu, toutes boîtes confondues.
+ * ?client=<id> : les mails reconnus comme venant de ce client, toutes boîtes confondues (fiche client).
+ * Hors Direction, Admin et ADCI : toujours les seules demandes affectées à la personne.
  */
-const listeQuery = z.object({ dossier: z.string().min(1).optional(), boite: z.enum(BOITES).default('Devis') })
+const listeQuery = z.object({ dossier: z.string().min(1).optional(), boite: z.enum(BOITES).default('Devis'), client: z.string().min(1).optional() })
 demandesDevisRouter.get('/', validate({ query: listeQuery }), async (_req, res) => {
-  const { dossier, boite } = res.locals.query as z.infer<typeof listeQuery>
-  const parDossier = !dossier ? {} : dossier === SANS_DOSSIER ? { dossierId: null } : { dossierId: { in: sousArbre(await dossiersPlats(), dossier) } }
-  const demandes = await prisma.demandeMail.findMany({ where: { AND: [parDossier, dansBoite(boite)] }, orderBy: { recuLe: 'desc' }, take: 500 })
-  ok(res, demandes.map(toDemandeDto))
+  const user = res.locals.user!
+  // Hors gestion, on ne voit que ses demandes, toutes boîtes confondues
+  const { dossier, boite, client } = gereLesDemandes(user.role)
+    ? (res.locals.query as z.infer<typeof listeQuery>)
+    : { dossier: MES_DEMANDES, boite: 'Devis' as const, client: undefined }
+  const pour = dossier?.startsWith(POUR) ? dossier.slice(POUR.length) : dossier === MES_DEMANDES ? user.id : null
+  const parDossier: Prisma.DemandeMailWhereInput = !dossier
+    ? {}
+    : pour
+      ? { affecteAId: pour }
+      : dossier === SANS_DOSSIER
+        ? { dossierId: null }
+        : dossier === DEMANDES_DEVIS
+          ? SEULES_DEMANDES_DEVIS
+          : dossier === EN_RETARD
+            ? enRetard()
+            : { dossierId: { in: sousArbre(await dossiersPlats(), dossier) } }
+  // Demandes de devis, en retard et affectées : réunies quelle que soit leur boîte (un mail ancien a pu être rangé ailleurs)
+  const parBoite = dossier === DEMANDES_DEVIS || dossier === EN_RETARD || pour || client ? {} : dansBoite(boite)
+  const parClient: Prisma.DemandeMailWhereInput = client ? { donnees: { path: '$.client.clientId', equals: client } } : {}
+  const demandes = await prisma.demandeMail.findMany({ where: { AND: [parDossier, parBoite, parClient] }, orderBy: { recuLe: 'desc' }, take: 500 })
+  const maintenant = new Date()
+  const limite = limiteRetard(maintenant)
+  ok(res, demandes.map((d) => toDemandeDto(d, maintenant, limite)))
 })
 
 /** État de la relève + nombre de demandes à traiter (pastille du menu). */
 demandesDevisRouter.get('/etat', async (_req, res) => {
-  ok(res, { ...etatReleve(), ...(await aTraiter()) })
+  ok(res, { ...etatReleve(), ...(await aTraiter(res.locals.user!.id)) })
 })
 
 /** Lance la relève sans l'attendre (elle peut durer plusieurs minutes) : le front suit l'avancement via /etat. */
-demandesDevisRouter.post('/relever', async (_req, res) => {
+demandesDevisRouter.post('/relever', gestionSeulement, async (_req, res) => {
   void relever()
-  ok(res, { ...etatReleve(), ...(await aTraiter()) })
+  ok(res, { ...etatReleve(), ...(await aTraiter(res.locals.user!.id)) })
 })
+
+/** Affecte des demandes à une personne, qui les traitera (null : les désaffecte). */
+demandesDevisRouter.post(
+  '/affecter',
+  validate({ body: z.object({ ids: z.array(z.string().min(1)).min(1).max(500), utilisateurId: z.string().min(1).nullable() }) }),
+  async (_req, res) => {
+    const { ids, utilisateurId } = res.locals.body as { ids: string[]; utilisateurId: string | null }
+    if (utilisateurId) {
+      const u = await prisma.utilisateur.findUnique({ where: { id: utilisateurId }, select: { actif: true } })
+      if (!u) throw new NotFoundError('Utilisateur introuvable')
+      if (!u.actif) throw new ConflictError('Ce compte est désactivé : choisissez une autre personne')
+    }
+    const { count } = await prisma.demandeMail.updateMany({
+      where: { id: { in: ids } },
+      data: { affecteAId: utilisateurId, affecteLe: utilisateurId ? new Date() : null },
+    })
+    ok(res, { count })
+  },
+)
 
 // ─── Catégories (rangement manuel, une catégorie par demande) ───
 
@@ -172,6 +285,14 @@ demandesDevisRouter.post(
 // ─── Dossiers (arborescence, un dossier par demande, indépendant de la catégorie) ───
 
 const SANS_DOSSIER = 'aucun'
+/** Rubrique « Demandes de devis » : pas un dossier, les mails marqués comme demandes de devis */
+const DEMANDES_DEVIS = 'devis'
+const SEULES_DEMANDES_DEVIS: Prisma.DemandeMailWhereInput = { donnees: { path: '$.demandeDevis', equals: true } }
+/** Rubrique « Mes demandes », et demandes affectées à une personne (« pour:<id> », depuis le CRM) */
+const MES_DEMANDES = 'moi'
+const POUR = 'pour:'
+/** Rubrique « En retard » : demandes suivies à traiter au-delà du délai attendu */
+const EN_RETARD = 'retard'
 const dossierSchema = z.object({ nom: z.string().trim().min(1, 'Indiquez un nom').max(60), parentId: z.string().min(1).nullable().optional() })
 
 const dossiersPlats = () => prisma.dossierDemande.findMany({ select: { id: true, nom: true, parentId: true }, orderBy: { nom: 'asc' } })
@@ -199,10 +320,17 @@ async function verifierNomLibre(nom: string, parentId: string | null, saufId?: s
 /** ?boite=Intervention : compteurs de la boîte Intervention (par défaut : boîte Devis). */
 demandesDevisRouter.get('/dossiers', validate({ query: z.object({ boite: z.enum(BOITES).default('Devis') }) }), async (_req, res) => {
   const { boite } = res.locals.query as { boite: (typeof BOITES)[number] }
-  const [dossiers, comptes] = await Promise.all([
+  const [dossiers, comptes, comptesDevis, comptesMoi, retards] = await Promise.all([
     dossiersPlats(),
     prisma.demandeMail.groupBy({ by: ['dossierId', 'statut'], where: dansBoite(boite), _count: { _all: true } }),
+    prisma.demandeMail.groupBy({ by: ['statut'], where: SEULES_DEMANDES_DEVIS, _count: { _all: true } }),
+    prisma.demandeMail.groupBy({ by: ['statut'], where: { affecteAId: res.locals.user!.id }, _count: { _all: true } }),
+    prisma.demandeMail.count({ where: enRetard() }),
   ])
+  const total = (lignes: { statut: StatutDemande; _count: { _all: number } }[]) => ({
+    mails: lignes.reduce((n, c) => n + c._count._all, 0),
+    aTraiter: lignes.filter((c) => c.statut === StatutDemande.A_TRAITER).reduce((n, c) => n + c._count._all, 0),
+  })
   const compter = (filtre: (c: (typeof comptes)[number]) => boolean) => {
     const lignes = comptes.filter(filtre)
     return {
@@ -214,6 +342,10 @@ demandesDevisRouter.get('/dossiers', validate({ query: z.object({ boite: z.enum(
     dossiers: dossiers.map((d) => ({ ...d, ...compter((c) => c.dossierId === d.id) })),
     sansDossier: compter((c) => c.dossierId === null),
     tous: compter(() => true),
+    demandesDevis: total(comptesDevis),
+    mesDemandes: total(comptesMoi),
+    // Toutes à traiter, par définition
+    enRetard: { mails: retards, aTraiter: retards },
   })
 })
 
@@ -329,6 +461,8 @@ demandesDevisRouter.post('/:id/lier', validate({ params: idParams, body: z.objec
   const devis = await prisma.devis.findUnique({ where: { numero: res.locals.body.numero }, select: { id: true } })
   if (!devis) throw new NotFoundError(`Aucun devis n° ${res.locals.body.numero}`)
   await marquerTraitee(prisma, d.id, { statut: StatutDemande.DEVIS_CREE, devisId: devis.id, traiteParId: res.locals.user!.id, traiteLe: new Date() })
+  // Un mail d'accord ou de refus lié à son devis : la réponse du client y est reportée
+  await appliquerResultatDevis(d.id)
   ok(res, toDemandeDto(await trouver(d.id)))
 })
 

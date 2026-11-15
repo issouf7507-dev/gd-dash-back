@@ -3,7 +3,7 @@ import { env } from './config/env.ts'
 import { logger } from './lib/logger.ts'
 import { prisma } from './lib/prisma.ts'
 import { regrouperAnciens } from './modules/demandes-mail/fils.ts'
-import { classerAnciens, demarrerReleve as demarrerReleveDemandes, rangerDossiersAuto } from './modules/demandes-mail/service.ts'
+import { classerAnciens, demarrerReleve as demarrerReleveDemandes, lireResultatsDevis, marquerDemandesDevis, rangerDossiersAuto } from './modules/demandes-mail/service.ts'
 import { demarrerReleve } from './modules/import-mail/service.ts'
 
 const onListen = () => logger.info(`API GD démarrée sur http://${env.HOST ?? 'localhost'}:${env.PORT}/api`)
@@ -21,6 +21,12 @@ void classerAnciens()
   // Crée les dossiers automatiques (CV, Publicité, Fournisseurs…) et y range les mails déjà reçus (une seule fois)
   .then(() => rangerDossiersAuto())
   .catch((err) => logger.error({ err }, 'demandes mail : rangement dans les dossiers automatiques en échec'))
+  // Marque les demandes de devis (rubrique « Demandes de devis ») d'après les règles actuelles
+  .then(() => marquerDemandesDevis())
+  .catch((err) => logger.error({ err }, 'demandes mail : marquage des demandes de devis en échec'))
+  // Reporte sur les devis les accords et refus des clients lus dans les mails déjà reçus
+  .then(() => lireResultatsDevis())
+  .catch((err) => logger.error({ err }, 'demandes mail : lecture des réponses aux devis en échec'))
 
 // Arrêt propre (PM2 reload, Ctrl+C) : on termine les requêtes en cours puis on ferme MySQL
 async function shutdown(signal: string) {

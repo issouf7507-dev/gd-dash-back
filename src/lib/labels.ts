@@ -19,6 +19,7 @@ import {
   NiveauRelance,
   Planification,
   RelanceDevis,
+  ResultatDevis,
   Role,
   StatutADCI,
   StatutChantier,
@@ -27,6 +28,7 @@ import {
   StatutDemande,
   BoiteDemande,
   StatutImport,
+  TypeSuiviDevis,
   TypeClient,
   TypeIntervenant,
 } from '../generated/prisma/client.ts'
@@ -76,6 +78,19 @@ export const statutADCI = mapping<StatutADCI, StatutADCILabel>({
 })
 export const statutConducteur = mapping<StatutConducteur, StatutConducteurLabel>({ A_VERIFIER: 'À vérifier', VALIDE: 'Validé' })
 export const relanceDevis = mapping<RelanceDevis, 'OUI' | 'NON' | 'RAS'>({ OUI: 'OUI', NON: 'NON', RAS: 'RAS' })
+export const resultatDevis = mapping<ResultatDevis, 'En attente' | 'Accepté' | 'Refusé' | 'Sans suite'>({
+  EN_ATTENTE: 'En attente',
+  ACCEPTE: 'Accepté',
+  REFUSE: 'Refusé',
+  SANS_SUITE: 'Sans suite',
+})
+export const typeSuiviDevis = mapping<TypeSuiviDevis, 'Validation demandée' | 'Validé' | 'Validation refusée' | 'Envoyé au client' | 'Relance'>({
+  DEMANDE_VALIDATION: 'Validation demandée',
+  VALIDE: 'Validé',
+  VALIDATION_REFUSEE: 'Validation refusée',
+  ENVOYE: 'Envoyé au client',
+  RELANCE: 'Relance',
+})
 export const statutImport = mapping<StatutImport, 'À vérifier' | 'Importé' | 'Ignoré' | 'Erreur'>({
   A_VERIFIER: 'À vérifier',
   IMPORTE: 'Importé',

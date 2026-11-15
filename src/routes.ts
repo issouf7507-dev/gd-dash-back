@@ -4,6 +4,7 @@ import { chantiersRouter, observationsRouter } from './modules/chantiers/routes.
 import { clientsRouter } from './modules/clients/routes.ts'
 import { demandesDevisRouter } from './modules/demandes-mail/routes.ts'
 import { devisRouter } from './modules/devis/routes.ts'
+import { equipesRouter } from './modules/equipes/routes.ts'
 import { facturesRouter, reglementsRouter } from './modules/factures/routes.ts'
 import { importsDevisRouter } from './modules/import-mail/routes.ts'
 import { healthRouter } from './modules/health/routes.ts'
@@ -22,6 +23,7 @@ apiRouter.use('/clients', clientsRouter)
 apiRouter.use('/devis', devisRouter)
 apiRouter.use('/imports-devis', importsDevisRouter)
 apiRouter.use('/demandes-devis', demandesDevisRouter)
+apiRouter.use('/equipes', equipesRouter)
 apiRouter.use('/intervenants', intervenantsRouter)
 apiRouter.use('/interventions', interventionsRouter)
 apiRouter.use('/chantiers', chantiersRouter)

@@ -227,6 +227,9 @@ export const defautsDevis: DevisInput = {
   relance: null,
   commentaires: '',
   montantHT: null,
+  resultat: 'En attente',
+  resultatLe: null,
+  motifRefus: null,
 }
 
 // ─── Relève ──────────────────────────────────────────────────

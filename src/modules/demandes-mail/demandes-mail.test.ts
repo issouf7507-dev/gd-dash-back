@@ -12,9 +12,10 @@ import { hashPassword } from '../../lib/password.ts'
 import { prisma } from '../../lib/prisma.ts'
 import { eml } from '../import-mail/exemples.ts'
 import { sourceDossier } from '../import-mail/sources/dossier.ts'
-import { boiteDe, dossierAutoDe, extraireDemande, extraireReglement, rapprocherClientDemande, ressembleACv } from './extract.ts'
+import { boiteDe, dossierAutoDe, estDemandeDeDevis, estMailDeDemandeDevis, resultatDevisDans, extraireDemande, extraireReglement, rapprocherClientDemande, ressembleACv, sansHistorique } from './extract.ts'
+import { joursOuvres, limiteRetard } from './delais.ts'
 import { objetNormalise, regrouperAnciens } from './fils.ts'
-import { classerAnciens, dossierStockage, rangerDossiersAuto, relever } from './service.ts'
+import { appliquerResultatDevis, classerAnciens, dossierStockage, rangerDossiersAuto, relever } from './service.ts'
 
 if (!process.env.DATABASE_URL?.includes('/gd_test')) throw new Error('Les tests doivent tourner sur la base gd_test')
 
@@ -196,6 +197,75 @@ describe('extraction', () => {
     expect(boiteDe('Montage de l’échafaudage prévu lundi')).toBe('Chantier')
     expect(boiteDe('Demande de devis pour une gouttière')).toBe('Devis')
     expect(extraireDemande(mailLu({ objet: 'Planning de chantier', corps: 'Bonjour, voici le planning.' })).estUneDemande).toBe(true)
+  })
+
+  it('range dans la boîte Devis les demandes de devis, même quand le mail parle de chantier ou de facture', () => {
+    // Objet de demande de chiffrage : l'emporte sur le vocabulaire de chantier du corps
+    expect(boiteDe('Demande de Devis N: DEV2689 / SDC 30 RUE DU BAC\nMerci de nous faire parvenir un devis. Échafaudage à prévoir.')).toBe('Devis')
+    expect(boiteDe('SDC / 46, rue de Naples - Mise à jour devis\nRéfection complète des versants de couverture')).toBe('Devis')
+    expect(boiteDe('8 rue Gabriel Péri / Demande proposition\nCi-joint une demande de proposition.')).toBe('Devis')
+    // Demande écrite dans le dernier message d'une réponse
+    expect(boiteDe('Re: Ordre de Service N: BDCE26410\nBonjour, pouvez-vous m’indiquer le tarif pour la recherche par caméra ?')).toBe('Devis')
+    expect(boiteDe('RE: Recherche de fuite Bâtiment F\nPouvez-vous nous transmettre un chiffrage avec l’option fonte ?\n\nDe : GD\nVotre facture n° FGD26-0001')).toBe('Devis')
+    expect(boiteDe('RE: 50 rue Saint-Sébastien\nNous restons en attente de votre devis pour remédier à ce désordre.')).toBe('Devis')
+    expect(boiteDe('Re: 47 rue d’Alsace\nLe sarking doit être intégré au devis en base. Pouvez-vous modifier le devis ?')).toBe('Devis')
+    // L'historique cité ne fait pas une demande de devis
+    expect(boiteDe('RE: 29 VANNEAU - Problème de velux\nC’est bien noté, merci.\n\nDe : GD Couverture\nUne fuite au dernier étage, merci d’intervenir.')).toBe('Intervention')
+    // Un devis accepté n'est plus une demande de chiffrage
+    expect(boiteDe('Accord sur devis - remplacement de plaque\nVeuillez trouver l’ordre de service, merci de nous établir la facture d’acompte.')).toBe('Intervention')
+    expect(estDemandeDeDevis('Devis validé - DGD26-0547', 'Votre devis a été validé.')).toBe(false)
+    // Une demande de visite seule (constat d'humidité…) n'est pas une demande de devis ; avec audit ou devis, oui
+    expect(estDemandeDeDevis('DDE DE VISITE SUR SITE BAT B - GROSSE HUMIDITE', '')).toBe(false)
+    expect(estDemandeDeDevis('Demande de visite technique/audit – couverture', '')).toBe(true)
+    expect(estDemandeDeDevis('IENA - Demande de visite et devis – état des toitures', '')).toBe(true)
+    expect(sansHistorique('Merci.\n\nLe jeu. 5 nov. 2026 à 09:16, GD a écrit :\nancien message').trim()).toBe('Merci.')
+  })
+
+  it('ne montre dans « Demandes de devis » que les demandes écrites par des clients', () => {
+    expect(estMailDeDemandeDevis('Demande de devis - toiture', 'Bonjour, merci de nous faire un devis.', 'gestion@syndic.fr')).toBe(true)
+    // Réponse de GD dans le fil : pas une demande ; transfert par un collègue : oui
+    expect(estMailDeDemandeDevis('RE: Demande de devis - toiture', 'Veuillez trouver ci-joint notre devis.', 'contact@gdcouverture.fr')).toBe(false)
+    expect(estMailDeDemandeDevis('TR: Demande de devis - toiture', 'Raïssa, voici une demande de devis.', 'cd@gdcouverture.fr')).toBe(true)
+    expect(estMailDeDemandeDevis('Relance globale - 9 devis non traités', 'Merci de faire le devis.', 'gd.couv@gmail.com')).toBe(false)
+    expect(estMailDeDemandeDevis('Demande de devis – Isolation', 'Veuillez trouver ci-joint notre devis.', 'no-reply@solutionsbtp.fr')).toBe(false)
+  })
+
+  it('range les bons de commande de GD et leurs réponses dans le dossier BC', () => {
+    const dossier = (texte: string, expediteur: string) => dossierAutoDe({ texte, expediteur, nomsPieces: [] })
+    const bc = { nom: 'Bons de commande (BC)', ecarter: true }
+    expect(dossier('Confirmation prise en charge commande n° BC-2611089\nVeuillez trouver ci-joint notre commande.', 'no-reply@solutionsbtp.fr')).toMatchObject(bc)
+    expect(dossier('RE: Confirmation prise en charge commande n° BC-2610157\nBien reçu, délai à confirmer.', 'agence@raboni.fr')).toMatchObject(bc)
+    expect(dossier('8 rue Baudelique\nBonjour, je te transmets ci-joint ton bon de commande.', 'contact@gdcouverture.fr')).toMatchObject(bc)
+    // Un client qui parle de bon de commande n'est pas un bon de commande de GD
+    expect(dossier('Travaux toiture\nVeuillez trouver notre bon de commande pour les travaux.', 'gestion@syndic.fr')).toBeNull()
+  })
+
+  it('lit l’accord ou le refus du client sur un devis', () => {
+    const client = 'gestion@syndic.fr'
+    expect(resultatDevisDans('accord 58 rue du Faubourg St Denis', 'Nous avons l’accord sur votre devis n° DGD26-0850 du 09/09/26.', client)).toEqual({
+      resultat: 'Accepté',
+      numeros: ['DGD26-0850'],
+      motif: null,
+    })
+    expect(resultatDevisDans('DEVIS SIGNE - TOUR ORIX', 'Veuillez trouver votre devis dûment signé.', client)?.resultat).toBe('Accepté')
+    expect(resultatDevisDans('SDC 1 RUE JEAN BOLOGNE - OS DEVIS TOITURE', 'ORDRE DE SERVICE – BON POUR ACCORD', client)?.resultat).toBe('Accepté')
+    // N° du devis lu dans l'historique cité (mail d'envoi du devis)
+    expect(resultatDevisDans('Re: Devis toiture', 'Devis accepté, merci.\n\nDe : GD\nVeuillez trouver notre devis DGD26-0923/2.', client)?.numeros).toEqual(['DGD26-0923/2'])
+    const refus = resultatDevisDans('Refus du Devis - DEV261808 / 4/6 BARRAGE', 'Bonjour,\nNous reconnaissons la qualité de vos prestations mais une autre entreprise a été retenue.', client)
+    expect(refus).toMatchObject({ resultat: 'Refusé' })
+    // Pas une réponse : notification interne, réponse de GD, simple formule de politesse
+    expect(resultatDevisDans('Devis validé - DGD26-0547', 'Votre devis a été validé par Kassa.', 'gd.couv@gmail.com')).toBeNull()
+    expect(resultatDevisDans('RE: Devis accepté', 'Merci pour votre accord sur le devis.', 'contact@gdcouverture.fr')).toBeNull()
+    expect(resultatDevisDans('Re: Ordre de service', 'Si vous ne souhaitez pas donner suite, dites-le-moi.', client)).toBeNull()
+  })
+
+  it('garde une demande de devis que le pied de mail ferait passer pour une publicité ou un sous-traitant', () => {
+    const dossier = (texte: string, expediteur = 'x@syndic.fr') => dossierAutoDe({ texte, expediteur, nomsPieces: [] })
+    expect(dossier('Fw: [Urgent] 82 rue de Paris\nPouvez-vous m’adresser le devis pour la reprise de l’étanchéité ?\nSe désabonner')).toBeNull()
+    expect(dossier('136 rue du Chemin Vert\nAfin de vous adresser une demande de devis, merci de nous envoyer votre attestation de vigilance.')).toBeNull()
+    // Une newsletter qui parle de devis reste une publicité ; un négoce reste un fournisseur
+    expect(dossier('Devis gratuit sous 24 h !\nFaites établir votre devis. Se désabonner')).toMatchObject({ nom: 'Publicité / newsletters' })
+    expect(dossier('RE: Demande de prix\nVeuillez trouver notre proposition, merci de nous transmettre votre devis signé.', 'agence@pointp.fr')).toMatchObject({ nom: 'Fournisseurs' })
   })
 
   it('range dans la boîte Facture les paiements et factures, et lit le règlement', () => {
@@ -470,6 +540,114 @@ describe('relève et traitement', () => {
     await prisma.demandeMail.delete({ where: { id: ancien.id } })
   })
 
+  it('affecte une demande à une personne, qui ne voit et ne traite que ses demandes ; le CRM montre la charge de chacun', async () => {
+    await prisma.equipe.deleteMany()
+    const conducteur = await prisma.utilisateur.create({
+      data: { prenom: 'Davis', nom: 'CONDUCTEUR', email: 'conducteur@test.local', role: Role.CONDUCTEUR, passwordHash: await hashPassword(PASSWORD) },
+    })
+    const agent = request.agent(app)
+    await agent.post('/api/auth/login').send({ email: 'conducteur@test.local', password: PASSWORD }).expect(200)
+    const [a, b] = await prisma.demandeMail.findMany({ orderBy: { recuLe: 'asc' }, take: 2 })
+
+    // Avant affectation : rien à voir, pas d'accès à la demande, pas d'affectation possible
+    expect((await agent.get('/api/demandes-devis').expect(200)).body.data).toEqual([])
+    await agent.get(`/api/demandes-devis/${a.id}`).expect(403)
+    await agent.post('/api/demandes-devis/affecter').send({ ids: [a.id], utilisateurId: conducteur.id }).expect(403)
+
+    await adci.post('/api/demandes-devis/affecter').send({ ids: [a.id], utilisateurId: conducteur.id }).expect(200)
+    // Liste filtrée sur ses demandes, quelle que soit la boîte ou le dossier demandés
+    const siennes = (await agent.get('/api/demandes-devis?boite=Facture').expect(200)).body.data as { id: string; affecteAId: string }[]
+    expect(siennes.map((d) => d.id)).toEqual([a.id])
+    expect(siennes[0].affecteAId).toBe(conducteur.id)
+    await agent.get(`/api/demandes-devis/${a.id}`).expect(200)
+    await agent.get(`/api/demandes-devis/${b.id}`).expect(403)
+    await agent.post(`/api/demandes-devis/${b.id}/ignorer`).expect(403)
+    await agent.post(`/api/demandes-devis/${a.id}/boite`).send({ boite: 'Chantier' }).expect(403)
+    expect((await agent.get('/api/demandes-devis/etat').expect(200)).body.data.mesDemandes).toBe(1)
+    // Côté gestion : la rubrique de la personne
+    expect((await adci.get(`/api/demandes-devis?dossier=pour:${conducteur.id}`).expect(200)).body.data.map((d: { id: string }) => d.id)).toEqual([a.id])
+
+    // CRM : équipe, membres, charge
+    await agent.get('/api/equipes').expect(403)
+    const equipe = (await adci.post('/api/equipes').send({ nom: 'Couverture', couleur: 'green', membres: [conducteur.id] }).expect(201)).body.data
+    expect(equipe).toMatchObject({ nom: 'Couverture', couleur: 'green', membres: [conducteur.id] })
+    await adci.post('/api/equipes').send({ nom: 'Couverture' }).expect(409)
+    const crm = (await adci.get('/api/equipes').expect(200)).body.data
+    expect(crm.charge[conducteur.id]).toMatchObject({ aTraiter: 1, total: 1 })
+    await adci.patch(`/api/equipes/${equipe.id}`).send({ membres: [] }).expect(200)
+    await adci.delete(`/api/equipes/${equipe.id}`).expect(200)
+
+    // Désaffectation
+    await adci.post('/api/demandes-devis/affecter').send({ ids: [a.id], utilisateurId: null }).expect(200)
+    expect(await prisma.demandeMail.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ affecteAId: null, affecteLe: null })
+    await prisma.utilisateur.delete({ where: { id: conducteur.id } })
+  })
+
+  it('signale les demandes en retard et mesure le délai de traitement de chacun', async () => {
+    const adciId = (await prisma.utilisateur.findFirstOrThrow({ where: { email: 'adci@test.local' } })).id
+    const ilYa = (jours: number) => new Date(Date.now() - jours * 86_400_000)
+    const creer = (objet: string, recuLe: Date, extra: Record<string, unknown> = {}) =>
+      prisma.demandeMail.create({
+        data: { messageId: `<${randomUUID()}@test>`, recuLe, expediteur: 'client@test.local', objet, corps: '', donnees: { demandeDevis: true }, anomalies: [], pieces: [], ...extra },
+      })
+    const ancienne = await creer('Demande de devis ancienne', ilYa(10))
+    const recente = await creer('Demande de devis récente', new Date())
+    // Pas une demande de devis, pas affectée : pas suivie
+    const autre = await creer('Info chantier', ilYa(10), { donnees: {} })
+    // Reçue un lundi à 9 h, traitée le mardi de la semaine suivante à 9 h : 6 jours ouvrés
+    const lundi = ilYa(14)
+    lundi.setUTCDate(lundi.getUTCDate() - ((lundi.getUTCDay() + 6) % 7))
+    lundi.setUTCHours(9, 0, 0, 0)
+    const mardi = new Date(lundi.getTime() + 8 * 86_400_000)
+    await creer('Demande de devis traitée', lundi, { statut: 'DEVIS_CREE', traiteLe: mardi, traiteParId: adciId })
+
+    const retard = (await adci.get('/api/demandes-devis?dossier=retard').expect(200)).body.data as { id: string; enRetard: boolean; delaiJours: number }[]
+    const ids = retard.map((d) => d.id)
+    expect(ids).toContain(ancienne.id)
+    expect(ids).not.toContain(recente.id)
+    expect(ids).not.toContain(autre.id)
+    expect(retard.every((d) => d.enRetard)).toBe(true)
+    expect(retard.find((d) => d.id === ancienne.id)!.delaiJours).toBeGreaterThanOrEqual(6)
+    const detail = (await adci.get(`/api/demandes-devis/${recente.id}`).expect(200)).body.data
+    expect(detail).toMatchObject({ enRetard: false })
+    expect((await adci.get('/api/demandes-devis/etat').expect(200)).body.data).toMatchObject({ enRetard: ids.length, delaiJours: 2 })
+    expect((await adci.get('/api/demandes-devis/dossiers').expect(200)).body.data.enRetard).toEqual({ mails: ids.length, aTraiter: ids.length })
+
+    const crm = (await adci.get('/api/equipes').expect(200)).body.data
+    expect(crm).toMatchObject({ enRetard: ids.length, traitees: 1, delaiJours: 2, periodeJours: 90 })
+    expect(crm.charge[adciId]).toMatchObject({ traitees: 1 })
+    expect(crm.charge[adciId].delaiMoyen).toBe(6)
+    await prisma.demandeMail.deleteMany({ where: { objet: { in: ['Demande de devis ancienne', 'Demande de devis récente', 'Info chantier', 'Demande de devis traitée'] } } })
+  })
+
+  it('reporte sur le devis l’accord ou le refus du client lu dans son mail, sans remplacer une saisie à la main', async () => {
+    const devis = await prisma.devis.create({
+      data: { numero: 'DGD26-0850', categorie: 'COUVERTURE', clientId: 'c-foncia', adresse: '58 rue du Faubourg Saint-Denis 75010 Paris', descriptif: '', commentaires: '' },
+    })
+    const mail = (objet: string, corps: string, recuLe: string) =>
+      prisma.demandeMail.create({
+        data: { messageId: `<${randomUUID()}@test>`, recuLe: new Date(recuLe), expediteur: 'Jérôme <j.d@syndic.fr>', objet, corps, donnees: {}, anomalies: [], pieces: [] },
+      })
+    const accord = await mail('accord 58 rue du Faubourg St Denis', 'Nous avons l’accord sur votre devis n° DGD26-0850.', '2026-10-20')
+    expect(await appliquerResultatDevis(accord.id)).toBe('DGD26-0850')
+    let d = (await adci.get(`/api/devis/${devis.id}`).expect(200)).body.data
+    expect(d).toMatchObject({ resultat: 'Accepté', resultatLe: '2026-10-20', resultatMailId: accord.id })
+    // Le formulaire renvoie la même réponse : le lien au mail est gardé
+    d = (await adci.patch(`/api/devis/${devis.id}`).send({ resultat: 'Accepté', commentaires: 'RAS' }).expect(200)).body.data
+    expect(d).toMatchObject({ resultat: 'Accepté', resultatMailId: accord.id })
+    // Un refus plus récent remplace une réponse lue dans un mail
+    const refus = await mail('Re: DGD26-0850', 'Finalement, nous ne donnerons pas suite à ce devis.', '2026-10-25')
+    await appliquerResultatDevis(refus.id)
+    d = (await adci.get(`/api/devis/${devis.id}`).expect(200)).body.data
+    expect(d).toMatchObject({ resultat: 'Refusé', resultatLe: '2026-10-25', motifRefus: 'Finalement, nous ne donnerons pas suite à ce devis.' })
+    // Saisie à la main : prioritaire sur les mails
+    d = (await adci.patch(`/api/devis/${devis.id}`).send({ resultat: 'Accepté', resultatLe: '2026-11-02' }).expect(200)).body.data
+    expect(d).toMatchObject({ resultat: 'Accepté', resultatLe: '2026-11-02', motifRefus: null, resultatMailId: null })
+    expect(await appliquerResultatDevis(refus.id)).toBeNull()
+    await prisma.demandeMail.deleteMany({ where: { id: { in: [accord.id, refus.id] } } })
+    await prisma.devis.delete({ where: { id: devis.id } })
+  })
+
   it('ignore puis reprend une demande', async () => {
     const d = await prisma.demandeMail.findFirstOrThrow({ where: { objet: 'Nos promotions du mois' } })
     expect((await adci.post(`/api/demandes-devis/${d.id}/reprendre`).expect(200)).body.data.statut).toBe('À traiter')
@@ -603,6 +781,20 @@ describe('relève et traitement', () => {
     await rangerDossiersAuto()
     expect((await prisma.demandeMail.findUniqueOrThrow({ where: { id: ancien.id } })).dossierId).toBeNull()
     expect((await prisma.dossierDemande.findMany({ where: { nom: 'CV' } })).length).toBe(1)
+  })
+})
+
+describe('délais en jours ouvrés', () => {
+  it('ne compte pas le week-end', () => {
+    // Vendredi 12 h → lundi 12 h : 1 jour ouvré
+    expect(joursOuvres(new Date('2026-11-13T12:00:00Z'), new Date('2026-11-16T12:00:00Z'))).toBe(1)
+    expect(joursOuvres(new Date('2026-11-16T08:00:00Z'), new Date('2026-11-16T20:00:00Z'))).toBe(0.5)
+  })
+  it('place la limite du retard avant le week-end', () => {
+    // Lundi 10 h, 2 jours ouvrés : jeudi 10 h
+    expect(limiteRetard(new Date('2026-11-16T10:00:00Z'), 2).toISOString()).toBe('2026-11-12T10:00:00.000Z')
+    // Samedi : le compte part de la fin du vendredi
+    expect(limiteRetard(new Date('2026-11-14T10:00:00Z'), 2).toISOString()).toBe('2026-11-12T00:00:00.000Z')
   })
 })
 
