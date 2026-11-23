@@ -9,6 +9,8 @@ import { facturesRouter, reglementsRouter } from './modules/factures/routes.ts'
 import { importsDevisRouter } from './modules/import-mail/routes.ts'
 import { healthRouter } from './modules/health/routes.ts'
 import { relancesRouter } from './modules/relances/routes.ts'
+import { notificationsRouter } from './modules/notifications/routes.ts'
+import { ticketsRouter } from './modules/tickets/routes.ts'
 import { intervenantsRouter } from './modules/intervenants/routes.ts'
 import { interventionsRouter } from './modules/interventions/routes.ts'
 import { utilisateursRouter } from './modules/utilisateurs/routes.ts'
@@ -32,3 +34,5 @@ apiRouter.use('/observations', observationsRouter)
 apiRouter.use('/factures', relancesRouter)
 apiRouter.use('/factures', facturesRouter)
 apiRouter.use('/reglements', reglementsRouter)
+apiRouter.use('/tickets', ticketsRouter)
+apiRouter.use('/notifications', notificationsRouter)

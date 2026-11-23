@@ -53,6 +53,24 @@ authRouter.get('/me', requireAuth, (_req, res) => {
   ok(res, toUtilisateurDto(res.locals.user!))
 })
 
+// Première connexion avec un mot de passe provisoire : la personne le garde (corps vide) ou en choisit un autre.
+// Dans les deux cas la question n'est plus posée.
+const premiereConnexionSchema = z.object({ motDePasse: z.string().regex(PASSWORD_RULE, PASSWORD_RULE_MESSAGE).optional() })
+
+authRouter.post('/premiere-connexion', requireAuth, validate({ body: premiereConnexionSchema }), async (_req, res) => {
+  const { motDePasse } = res.locals.body as z.infer<typeof premiereConnexionSchema>
+  const user = await prisma.utilisateur.update({
+    where: { id: res.locals.user!.id },
+    data: {
+      choixMotDePasse: false,
+      // Nouveau mot de passe : les autres sessions sont coupées, celle-ci est rouverte juste après
+      ...(motDePasse && { passwordHash: await hashPassword(motDePasse), sessionVersion: { increment: 1 } }),
+    },
+  })
+  if (motDePasse) openSession(res, user)
+  ok(res, toUtilisateurDto(user))
+})
+
 // ─── Mot de passe oublié, invitation ─────────────────────────
 
 const oubliSchema = z.object({ email: z.email().transform((e) => e.trim().toLowerCase()) })

@@ -1,12 +1,13 @@
 // Demandes de devis clients : extraction sur des mails calqués sur de vrais mails reçus sur contact@
 // (données anonymisées), puis parcours complet sur la base gd_test.
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createApp } from '../../app.ts'
+import { env } from '../../config/env.ts'
 import { Role, TypeClient } from '../../generated/prisma/client.ts'
 import { hashPassword } from '../../lib/password.ts'
 import { prisma } from '../../lib/prisma.ts'
@@ -581,6 +582,54 @@ describe('relève et traitement', () => {
     await adci.post('/api/demandes-devis/affecter').send({ ids: [a.id], utilisateurId: null }).expect(200)
     expect(await prisma.demandeMail.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ affecteAId: null, affecteLe: null })
     await prisma.utilisateur.delete({ where: { id: conducteur.id } })
+  })
+
+  it('prévient par email la personne à qui l’on affecte des demandes (une fois, jamais soi-même)', async () => {
+    const dossier = await mkdtemp(path.join(os.tmpdir(), 'gd-test-affectation-'))
+    const dossierAvant = env.ENVOI_MAIL_DOSSIER
+    Object.assign(env, { AFFECTATIONS_ENVOI: 'dossier', ENVOI_MAIL_DOSSIER: dossier })
+    const davis = await prisma.utilisateur.create({ data: { prenom: 'Davis', nom: 'TOURE', email: 'davis@test.local', role: Role.CONDUCTEUR } })
+    const adciId = (await prisma.utilisateur.findFirstOrThrow({ where: { email: 'adci@test.local' } })).id
+    try {
+      const [a, b] = await prisma.demandeMail.findMany({ orderBy: { recuLe: 'asc' }, take: 2 })
+      await prisma.demandeMail.updateMany({ where: { id: { in: [a.id, b.id] } }, data: { affecteAId: null } })
+      // b avait été ignorée (classée à tort en publicité) : l'affecter la remet à traiter
+      const statutB = b.statut
+      await prisma.demandeMail.update({ where: { id: b.id }, data: { statut: 'IGNOREE' } })
+      const mails = async () => (await readdir(dossier)).filter((f) => f.endsWith('davis@test.local.eml'))
+
+      // Deux demandes d'un coup : un seul email, qui les cite toutes les deux
+      const r = (await adci.post('/api/demandes-devis/affecter').send({ ids: [a.id, b.id], utilisateurId: davis.id }).expect(200)).body.data
+      expect(r).toMatchObject({ count: 2, reprises: 1, notifie: true, erreurNotif: null })
+      expect((await prisma.demandeMail.findUniqueOrThrow({ where: { id: b.id } })).statut).toBe('A_TRAITER')
+      await prisma.demandeMail.update({ where: { id: b.id }, data: { statut: statutB } })
+      expect(await mails()).toHaveLength(1)
+      const brut = await readFile(path.join(dossier, (await mails())[0]), 'utf8')
+      expect(brut).toContain('To: davis@test.local')
+      expect(brut).toContain('2 demandes')
+      expect(brut).toContain(`/demandes-recues/${a.id}`)
+
+      // Réaffectées à la même personne : pas de second email
+      expect((await adci.post('/api/demandes-devis/affecter').send({ ids: [a.id], utilisateurId: davis.id }).expect(200)).body.data.notifie).toBe(false)
+      // S'affecter soi-même : pas d'email
+      expect((await adci.post('/api/demandes-devis/affecter').send({ ids: [a.id], utilisateurId: adciId }).expect(200)).body.data.notifie).toBe(false)
+      expect(await mails()).toHaveLength(1)
+
+      // Notification dans l'appli : une seule pour Davis (les deux demandes), aucune pour soi-même
+      const notifs = await prisma.notification.findMany({ where: { utilisateurId: davis.id } })
+      expect(notifs).toHaveLength(1)
+      expect(notifs[0]).toMatchObject({ type: 'affectation', titre: '2 demandes à traiter', lien: '/mes-demandes', luLe: null })
+      expect(await prisma.notification.count({ where: { utilisateurId: adciId } })).toBe(0)
+      // Chacun ne voit et ne marque que les siennes
+      expect((await adci.get('/api/notifications').expect(200)).body.data).toEqual({ notifications: [], nonLues: 0 })
+      expect((await adci.post('/api/notifications/lire').send({ ids: [notifs[0].id] }).expect(200)).body.data.count).toBe(0)
+      expect((await prisma.notification.findUniqueOrThrow({ where: { id: notifs[0].id } })).luLe).toBeNull()
+    } finally {
+      Object.assign(env, { AFFECTATIONS_ENVOI: 'off', ENVOI_MAIL_DOSSIER: dossierAvant })
+      await prisma.demandeMail.updateMany({ where: { affecteAId: { in: [davis.id, adciId] } }, data: { affecteAId: null, affecteLe: null } })
+      await prisma.utilisateur.delete({ where: { id: davis.id } })
+      await rm(dossier, { recursive: true, force: true })
+    }
   })
 
   it('signale les demandes en retard et mesure le délai de traitement de chacun', async () => {
