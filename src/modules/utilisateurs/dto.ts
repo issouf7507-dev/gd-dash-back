@@ -11,5 +11,7 @@ export function toUtilisateurDto(u: Utilisateur) {
     role: roleLabel(u.role),
     actif: u.actif,
     aMotDePasse: u.passwordHash !== null,
+    /** Mot de passe provisoire : à la première connexion, la personne choisit de le garder ou de le changer */
+    choixMotDePasse: u.choixMotDePasse,
   }
 }

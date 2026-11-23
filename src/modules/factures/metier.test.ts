@@ -1,5 +1,5 @@
 // Intervenants, interventions, chantiers (+ journal) et factures (+ règlements, relances) sur la base gd_test.
-import { access, mkdtemp, readdir, readFile } from 'node:fs/promises'
+import { access, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import request from 'supertest'
@@ -211,8 +211,11 @@ describe('factures, règlements et relances', () => {
   })
 
   it('un envoi en échec est noté avec sa cause', async () => {
-    // Dossier impossible à créer : l'envoi échoue
-    Object.assign(env, { ENVOI_MAIL: 'dossier', ENVOI_MAIL_DOSSIER: '/dev/null/impossible' })
+    // Dossier impossible à créer, sur tous les systèmes : son chemin passe par un fichier.
+    // (« /dev/null/… » ne convient pas : Windows crée C:\dev\null\… sans erreur.)
+    const fichier = path.join(os.tmpdir(), `gd-test-pas-un-dossier-${process.pid}`)
+    await writeFile(fichier, '')
+    Object.assign(env, { ENVOI_MAIL: 'dossier', ENVOI_MAIL_DOSSIER: path.join(fichier, 'impossible') })
     try {
       const rel = await direction
         .post(`/api/factures/${ids.facture}/relances`)

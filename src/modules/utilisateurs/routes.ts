@@ -2,10 +2,10 @@ import { ROLES } from '@gd/shared/types'
 import { Router } from 'express'
 import { z } from 'zod'
 import { AppError, ConflictError, ForbiddenError, NotFoundError } from '../../lib/app-error.ts'
-import { envoiParServeur, envoyerMail } from '../../lib/envoi-mail.ts'
-import { creerJeton, lienMotDePasse } from '../../lib/jetons.ts'
+import { env } from '../../config/env.ts'
+import { envoyerMail } from '../../lib/envoi-mail.ts'
 import { Role, roleKey, roleLabel } from '../../lib/labels.ts'
-import { hashPassword, PASSWORD_RULE, PASSWORD_RULE_MESSAGE } from '../../lib/password.ts'
+import { hashPassword, motDePasseProvisoire, PASSWORD_RULE, PASSWORD_RULE_MESSAGE } from '../../lib/password.ts'
 import { isForeignKeyViolation, isUniqueViolation } from '../../lib/prisma-errors.ts'
 import { prisma } from '../../lib/prisma.ts'
 import { ok } from '../../lib/response.ts'
@@ -13,6 +13,7 @@ import { requireAuth, requireRole } from '../../middleware/auth.ts'
 import { validate } from '../../middleware/validate.ts'
 import { openSession } from '../auth/session.ts'
 import { toUtilisateurDto } from './dto.ts'
+import { htmlInvitation, objetInvitation, texteInvitation } from './mail-invitation.ts'
 
 export const utilisateursRouter = Router()
 
@@ -41,6 +42,26 @@ const createSchema = z.object({
 })
 const updateSchema = createSchema.partial()
 
+/** Mode d'envoi des emails d'accès */
+const modeAcces = () => env.INVITATIONS_ENVOI ?? env.ENVOI_MAIL
+
+/** Envoie l'email d'accès (identifiant + mot de passe) ; ne fait rien si le serveur n'envoie pas les emails. Lève une erreur lisible en cas d'échec. */
+async function envoyerAcces(user: { prenom: string; email: string; role: Role }, motDePasse: string, invitant: { prenom: string; nom: string }, renvoi: boolean) {
+  const mode = modeAcces()
+  if (mode === 'off') return false
+  const donnees = {
+    prenom: user.prenom,
+    email: user.email,
+    motDePasse,
+    role: roleLabel(user.role),
+    invitant: `${invitant.prenom} ${invitant.nom}`.trim(),
+    lienConnexion: `${env.APP_URL}/connexion`,
+    renvoi,
+  }
+  await envoyerMail({ a: user.email, objet: objetInvitation(donnees), corps: texteInvitation(donnees), html: htmlInvitation(donnees) }, mode)
+  return true
+}
+
 utilisateursRouter.get('/', async (_req, res) => {
   const users = await prisma.utilisateur.findMany({ orderBy: [{ prenom: 'asc' }, { nom: 'asc' }] })
   ok(res, users.map(toUtilisateurDto))
@@ -56,9 +77,20 @@ utilisateursRouter.post('/', validate({ body: createSchema }), async (_req, res)
   const { motDePasse: mdp, role, ...data } = res.locals.body as z.infer<typeof createSchema>
   try {
     const user = await prisma.utilisateur.create({
-      data: { ...data, role: roleKey(role), passwordHash: mdp ? await hashPassword(mdp) : null },
+      data: { ...data, role: roleKey(role), passwordHash: mdp ? await hashPassword(mdp) : null, choixMotDePasse: !!mdp },
     })
-    ok(res, toUtilisateurDto(user), { status: 201 })
+    // Mot de passe choisi à la création : la personne le reçoit par email avec son identifiant.
+    // Un échec d'envoi n'annule pas la création : l'administrateur transmet alors les accès lui-même.
+    let accesEnvoye = false
+    let erreurAcces: string | null = null
+    if (mdp && user.actif) {
+      try {
+        accesEnvoye = await envoyerAcces(user, mdp, res.locals.user!, false)
+      } catch (err) {
+        erreurAcces = err instanceof Error ? err.message : String(err)
+      }
+    }
+    ok(res, { ...toUtilisateurDto(user), accesEnvoye, erreurAcces }, { status: 201 })
   } catch (err) {
     if (isUniqueViolation(err)) throw new ConflictError('Un utilisateur existe déjà avec cet email')
     throw err
@@ -95,25 +127,29 @@ utilisateursRouter.patch('/:id', validate({ params: idParams, body: updateSchema
   }
 })
 
-// Invitation (ou nouvel accès) : lien à usage unique, valable 7 jours, pour choisir son mot de passe.
-// Envoyé par email si le serveur envoie les emails ; sinon le lien est renvoyé à l'administrateur, qui le transmet.
+// Invitation (ou renvoi des accès) : un mot de passe provisoire est créé et envoyé par email avec l'identifiant.
+// À la première connexion, la personne choisit de le garder ou d'en mettre un autre (choixMotDePasse).
+// Si le serveur n'envoie pas les emails, les accès sont renvoyés à l'administrateur, qui les transmet lui-même.
 utilisateursRouter.post('/:id/inviter', validate({ params: idParams }), async (_req, res) => {
   const user = await prisma.utilisateur.findUnique({ where: { id: res.locals.params.id } })
   if (!user) throw new NotFoundError('Utilisateur introuvable')
   if (!user.actif) throw new ConflictError("Ce compte est désactivé : réactivez-le avant d'envoyer une invitation")
-  const lien = lienMotDePasse(await creerJeton(user.id, 'INVITATION'))
-  if (!envoiParServeur()) return ok(res, { envoye: false, lien })
-  const invitant = `${res.locals.user!.prenom} ${res.locals.user!.nom}`.trim()
+
+  const motDePasse = motDePasseProvisoire()
+  // Envoi d'abord : si l'email ne part pas, l'ancien mot de passe reste valable
+  let envoye: boolean
   try {
-    await envoyerMail({
-      a: user.email,
-      objet: 'Votre accès au tableau de bord GD',
-      corps: `Bonjour ${user.prenom},\n\n${invitant} vous a ouvert un accès au tableau de bord GD.\n\nPour choisir votre mot de passe, ouvrez ce lien (valable 7 jours) :\n${lien}\n\nVotre identifiant est votre adresse email : ${user.email}\n\nGD`,
-    })
+    envoye = await envoyerAcces(user, motDePasse, res.locals.user!, user.passwordHash !== null)
   } catch (err) {
     throw new AppError(`L'invitation n'a pas pu être envoyée : ${err instanceof Error ? err.message : err}`, 502, 'SERVICE_UNAVAILABLE')
   }
-  ok(res, { envoye: true, lien: null })
+  // Nouveau mot de passe : les sessions déjà ouvertes sont coupées
+  await prisma.utilisateur.update({
+    where: { id: user.id },
+    data: { passwordHash: await hashPassword(motDePasse), choixMotDePasse: true, sessionVersion: { increment: 1 } },
+  })
+  // Sans envoi par le serveur : l'administrateur transmet lui-même les accès
+  ok(res, envoye ? { envoye: true, email: user.email, motDePasse: null } : { envoye: false, email: user.email, motDePasse })
 })
 
 // Refusée si l'utilisateur a un historique (devis, chantiers, observations…) : on le désactive à la place

@@ -26,6 +26,9 @@ export default defineConfig({
       IMPORT_MAIL_STOCKAGE: path.join(os.tmpdir(), 'gd-test-imports'),
       // Jamais d'email réel pendant les tests, même si server/.env active l'envoi
       ENVOI_MAIL: 'off',
+      TICKETS_ENVOI: 'off',
+      INVITATIONS_ENVOI: 'off',
+      AFFECTATIONS_ENVOI: 'off',
       PHOTOS_STOCKAGE: path.join(os.tmpdir(), 'gd-test-photos'),
     },
   },

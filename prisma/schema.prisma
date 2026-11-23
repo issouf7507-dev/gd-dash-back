@@ -158,30 +158,36 @@ enum TypeJeton {
 // ─────────────────────────────────────────────────────────────
 
 model Utilisateur {
-  id             String   @id @default(cuid())
-  prenom         String   @db.VarChar(100)
-  nom            String   @db.VarChar(100)
-  email          String   @unique @db.VarChar(191)
+  id              String   @id @default(cuid())
+  prenom          String   @db.VarChar(100)
+  nom             String   @db.VarChar(100)
+  email           String   @unique @db.VarChar(191)
   /// Null tant que l'utilisateur n'a pas défini son mot de passe (invitation)
-  passwordHash   String?  @db.VarChar(255)
-  role           Role
-  actif          Boolean  @default(true)
+  passwordHash    String?  @db.VarChar(255)
+  role            Role
+  actif           Boolean  @default(true)
   /// Incrémentée à chaque changement de mot de passe : les sessions ouvertes avant sont refusées
-  sessionVersion Int      @default(0)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  sessionVersion  Int      @default(0)
+  /// Mot de passe provisoire (invitation) : à la première connexion, la personne choisit de le garder ou de le changer
+  choixMotDePasse Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
-  devisConduits     Devis[]       @relation("DevisConducteur")
-  chantiersCharges  Chantier[]    @relation("ChantierChargeAffaires")
+  devisConduits     Devis[]         @relation("DevisConducteur")
+  chantiersCharges  Chantier[]      @relation("ChantierChargeAffaires")
   observations      Observation[]
   relancesEnvoyees  Relance[]
-  devisValides      Devis[]       @relation("DevisValidePar")
+  devisValides      Devis[]         @relation("DevisValidePar")
   suivisDevis       SuiviDevis[]
   jetons            JetonAuth[]
   auditLogs         AuditLog[]
-  importsTraites    ImportMail[]  @relation("ImportTraitePar")
-  demandesTraitees  DemandeMail[] @relation("DemandeTraiteePar")
-  demandesAffectees DemandeMail[] @relation("DemandeAffecteeA")
+  importsTraites    ImportMail[]    @relation("ImportTraitePar")
+  demandesTraitees  DemandeMail[]   @relation("DemandeTraiteePar")
+  demandesAffectees DemandeMail[]   @relation("DemandeAffecteeA")
+  mailsEnvoyes      MailEnvoye[]
+  tickets           Ticket[]
+  messagesTickets   TicketMessage[]
+  notifications     Notification[]
   equipes           Equipe[]
 
   @@map("utilisateurs")
@@ -560,6 +566,8 @@ model DemandeMail {
   /// Fil de discussion : les mails liés (réponse, même référence, même objet du même expéditeur) partagent la même valeur.
   /// Null tant que le mail n'a pas été rattaché (mails antérieurs à la fonction, regroupés au démarrage)
   filId          String?           @db.VarChar(191)
+  /// Réponses envoyées depuis l’application
+  reponses       MailEnvoye[]
   /// Message-ID cités par le mail (In-Reply-To, References) pour le rattacher à son fil
   refsFil        Json?
   createdAt      DateTime          @default(now())
@@ -576,6 +584,28 @@ model DemandeMail {
   @@index([factureId])
   @@index([affecteAId])
   @@map("demandes_mail")
+}
+
+/// Mail envoyé depuis l'application (réponse à un mail reçu, ou nouveau mail), depuis GRAPH_BOITE
+model MailEnvoye {
+  id          String       @id @default(cuid())
+  /// Mail reçu auquel il répond (null : nouveau mail)
+  demandeId   String?
+  demande     DemandeMail? @relation(fields: [demandeId], references: [id], onDelete: SetNull)
+  /// Destinataires, séparés par des virgules
+  a           String       @db.Text
+  cc          String       @db.Text
+  objet       String       @db.VarChar(500)
+  corps       String       @db.Text
+  /// Pièces jointes conservées dans ENVOI_MAIL_PIECES : [{ nom, fichier, type, taille }]
+  pieces      Json?
+  envoyeParId String?
+  envoyePar   Utilisateur? @relation(fields: [envoyeParId], references: [id], onDelete: SetNull)
+  envoyeLe    DateTime     @default(now())
+
+  @@index([demandeId])
+  @@index([envoyeLe])
+  @@map("mails_envoyes")
 }
 
 /// Équipe du CRM : regroupe des utilisateurs (un utilisateur peut être dans plusieurs équipes)
@@ -640,4 +670,72 @@ model SuiviDevis {
 
   @@index([devisId])
   @@map("suivis_devis")
+}
+
+/// Ticket de support : un souci signalé par un utilisateur de l'application
+model Ticket {
+  id          String          @id @default(cuid())
+  /// Numéro lisible (#12), attribué par la base
+  numero      Int             @unique @default(autoincrement())
+  titre       String          @db.VarChar(200)
+  description String          @db.Text
+  /// Bug, Question, Amélioration, Accès, Autre
+  categorie   String          @db.VarChar(30)
+  /// Basse, Normale, Haute, Urgente
+  priorite    String          @db.VarChar(20)
+  /// Ouvert, En cours, Résolu, Fermé
+  statut      String          @default("Ouvert") @db.VarChar(20)
+  /// Page de l'appli où le souci a été signalé, et navigateur utilisé
+  page        String?         @db.VarChar(500)
+  navigateur  String?         @db.VarChar(500)
+  /// Captures conservées dans ENVOI_MAIL_PIECES : [{ nom, fichier, type, taille }]
+  pieces      Json?
+  auteurId    String?
+  auteur      Utilisateur?    @relation(fields: [auteurId], references: [id], onDelete: SetNull)
+  /// Notification par email : envoyée, ou cause de l'échec
+  notifie     Boolean         @default(false)
+  erreurNotif String?         @db.Text
+  resoluLe    DateTime?
+  messages    TicketMessage[]
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@index([statut])
+  @@index([auteurId])
+  @@map("tickets")
+}
+
+/// Échange sur un ticket (question de l'équipe support, réponse de l'auteur…)
+model TicketMessage {
+  id        String       @id @default(cuid())
+  ticketId  String
+  ticket    Ticket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  auteurId  String?
+  auteur    Utilisateur? @relation(fields: [auteurId], references: [id], onDelete: SetNull)
+  texte     String       @db.Text
+  createdAt DateTime     @default(now())
+
+  @@index([ticketId])
+  @@map("tickets_messages")
+}
+
+/// Notification dans l'application (cloche de la barre du haut), ex. demande affectée
+model Notification {
+  id            String      @id @default(cuid())
+  utilisateurId String
+  utilisateur   Utilisateur @relation(fields: [utilisateurId], references: [id], onDelete: Cascade)
+  /// affectation, …
+  type          String      @db.VarChar(30)
+  titre         String      @db.VarChar(200)
+  texte         String      @db.Text
+  /// Page de l'appli ouverte au clic
+  lien          String?     @db.VarChar(500)
+  /// Personne à l'origine (ex. qui a affecté la demande)
+  par           String?     @db.VarChar(200)
+  luLe          DateTime?
+  createdAt     DateTime    @default(now())
+
+  @@index([utilisateurId, luLe])
+  @@index([createdAt])
+  @@map("notifications")
 }

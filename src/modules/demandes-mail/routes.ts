@@ -1,11 +1,12 @@
 import { Router } from 'express'
 import path from 'node:path'
 import { z } from 'zod'
-import { BoiteDemande, StatutDemande, type CategorieDemande, type DemandeMail, type Prisma } from '../../generated/prisma/client.ts'
+import { BoiteDemande, StatutDemande, type CategorieDemande, type DemandeMail, type MailEnvoye, type Prisma } from '../../generated/prisma/client.ts'
 import { ConflictError, ForbiddenError, NotFoundError } from '../../lib/app-error.ts'
 import { env } from '../../config/env.ts'
 import { boiteDemande, Role, statutDemande } from '../../lib/labels.ts'
 import { isUniqueViolation } from '../../lib/prisma-errors.ts'
+import { logger } from '../../lib/logger.ts'
 import { prisma } from '../../lib/prisma.ts'
 import { ok } from '../../lib/response.ts'
 import { requireAuth, requireRole } from '../../middleware/auth.ts'
@@ -15,6 +16,10 @@ import { toDevisDto } from '../devis/dto.ts'
 import { devisSchema, type DevisInput } from '../devis/schema.ts'
 import { chantierSchema, mapChantierError, toChantierDto, type ChantierInput } from '../chantiers/routes.ts'
 import { interventionSchema, mapInterventionError, toInterventionDto, type InterventionInput } from '../interventions/routes.ts'
+import { envoiParServeur, expediteur, envoyerMail, repondreMail, type PieceJointe } from '../../lib/envoi-mail.ts'
+import { htmlAffectation, objetAffectation, texteAffectation } from './mail-affectation.ts'
+import { notifier } from '../notifications/routes.ts'
+import { conserver, corpsPiece, deposer, dossierPiecesEnvoi, PIECES_MAX, preparer, TAILLE_MAX_PIECE, TAILLE_MAX_TOTALE, type PieceEnvoyee } from './pieces-envoi.ts'
 import { arrondi, enRetard, joursOuvres, limiteRetard } from './delais.ts'
 import { extraireReglement } from './extract.ts'
 import { mailsDuFil, regrouper, separer } from './fils.ts'
@@ -43,11 +48,11 @@ const GESTION: Role[] = [Role.DIRECTION, Role.ADMIN, Role.ADCI]
 export const gereLesDemandes = (role: Role) => GESTION.includes(role)
 
 /** Chemins de l'API qui ne sont pas l'id d'une demande */
-const RESERVES = new Set(['etat', 'relever', 'categories', 'dossiers', 'fils', 'affecter'])
+const RESERVES = new Set(['etat', 'relever', 'categories', 'dossiers', 'fils', 'affecter', 'envoi', 'envoyer', 'envoyes', 'pieces-jointes'])
 /** Lectures communes ouvertes à tous (listes : filtrées sur les demandes affectées à la personne) */
-const LECTURES = new Set(['/', '/etat', '/categories', '/dossiers'])
+const LECTURES = new Set(['/', '/etat', '/categories', '/dossiers', '/envoi'])
 const LECTURE_DEMANDE = /^\/([^/]+)(?:\/pieces\/\d+)?$/
-const ACTION_DEMANDE = /^\/([^/]+)\/(?:creer-devis|lier|ignorer|reprendre)$/
+const ACTION_DEMANDE = /^\/([^/]+)\/(?:creer-devis|lier|ignorer|reprendre|repondre)$/
 
 /**
  * Direction, Admin et ADCI ont tout l'accès. Les autres ne voient que les demandes qui leur sont affectées :
@@ -57,6 +62,8 @@ async function accesDemandes(req: Request, res: Response, next: NextFunction) {
   const user = res.locals.user!
   if (gereLesDemandes(user.role)) return next()
   if (req.method === 'GET' && LECTURES.has(req.path)) return next()
+  // Pièce jointe déposée pour une réponse (la personne peut répondre aux demandes qui lui sont affectées)
+  if (req.method === 'POST' && req.path === '/pieces-jointes') return next()
   const m = (req.method === 'GET' ? LECTURE_DEMANDE : req.method === 'POST' ? ACTION_DEMANDE : null)?.exec(req.path)
   if (!m || RESERVES.has(m[1])) return next(new ForbiddenError())
   try {
@@ -225,13 +232,88 @@ demandesDevisRouter.post(
       if (!u) throw new NotFoundError('Utilisateur introuvable')
       if (!u.actif) throw new ConflictError('Ce compte est désactivé : choisissez une autre personne')
     }
+    // Seules les demandes qui changent de personne déclenchent l'email (pas de doublon si on réaffecte à la même).
+    // « null » à part : en SQL, « différent de X » écarte aussi les demandes jamais affectées
+    const nouvelles = utilisateurId
+      ? await prisma.demandeMail.findMany({ where: { id: { in: ids }, OR: [{ affecteAId: null }, { affecteAId: { not: utilisateurId } }] }, orderBy: { recuLe: 'desc' } })
+      : []
     const { count } = await prisma.demandeMail.updateMany({
       where: { id: { in: ids } },
       data: { affecteAId: utilisateurId, affecteLe: utilisateurId ? new Date() : null },
     })
-    ok(res, { count })
+    // Affecter une demande ignorée, c'est demander qu'on la traite : elle est reprise (comme « Remettre à traiter »)
+    const reprises = utilisateurId
+      ? (
+          await prisma.demandeMail.updateMany({
+            where: { id: { in: ids }, statut: StatutDemande.IGNOREE },
+            data: { statut: StatutDemande.A_TRAITER, traiteParId: null, traiteLe: null },
+          })
+        ).count
+      : 0
+    const moi = res.locals.user!
+    // On ne se prévient pas soi-même ; un échec d'envoi n'annule pas l'affectation
+    let notifie = false
+    let erreurNotif: string | null = null
+    if (utilisateurId && utilisateurId !== moi.id && nouvelles.length) {
+      // Notification dans l'appli (cloche), en plus de l'email
+      const une = nouvelles.length === 1 ? nouvelles[0] : null
+      await notifier({
+        utilisateurId,
+        type: 'affectation',
+        titre: une ? 'Nouvelle demande à traiter' : `${nouvelles.length} demandes à traiter`,
+        texte: une
+          ? `${une.objet || '(sans objet)'} — ${(une.expediteur.match(/^\s*"?([^"<]*?)"?\s*</)?.[1] || une.expediteur).trim()}`
+          : nouvelles
+              .slice(0, 3)
+              .map((d) => d.objet || '(sans objet)')
+              .join(' · ') + (nouvelles.length > 3 ? ' …' : ''),
+        lien: une ? `${CHEMIN_BOITE[boiteDe(une)]}/${une.id}` : '/mes-demandes',
+        par: `${moi.prenom} ${moi.nom}`.trim(),
+      })
+      try {
+        notifie = await prevenirAffecte(utilisateurId, nouvelles, `${moi.prenom} ${moi.nom}`.trim())
+      } catch (err) {
+        erreurNotif = err instanceof Error ? err.message : String(err)
+        logger.warn({ err }, 'Email d’affectation non envoyé')
+      }
+    }
+    ok(res, { count, reprises, notifie, erreurNotif })
   },
 )
+
+/** Adresse de la liste des demandes reçues de chaque boîte, dans le front */
+const CHEMIN_BOITE: Record<(typeof BOITES)[number], string> = {
+  Devis: '/devis/demandes-recues',
+  Intervention: '/interventions/demandes-recues',
+  Chantier: '/chantiers/demandes-recues',
+  Facture: '/factures/demandes-recues',
+}
+
+/** Prévient par email la personne à qui l'on vient d'affecter des demandes. Renvoie faux si le serveur n'envoie pas d'emails. */
+async function prevenirAffecte(utilisateurId: string, demandes: DemandeMail[], par: string) {
+  const mode = env.AFFECTATIONS_ENVOI ?? env.ENVOI_MAIL
+  if (mode === 'off') return false
+  const u = await prisma.utilisateur.findUniqueOrThrow({ where: { id: utilisateurId }, select: { prenom: true, email: true } })
+  const donnees = {
+    prenom: u.prenom,
+    par,
+    lienListe: `${env.APP_URL}/mes-demandes`,
+    demandes: demandes.map((d) => {
+      const boite = boiteDe(d)
+      return {
+        expediteur: d.expediteur,
+        objet: d.objet,
+        recuLe: d.recuLe,
+        boite,
+        extrait: d.corps.replace(/\s+/g, ' ').trim().slice(0, 220) + (d.corps.length > 220 ? '…' : ''),
+        urgent: !!(d.donnees as { champs?: { urgent?: boolean } } | null)?.champs?.urgent,
+        lien: `${env.APP_URL}${CHEMIN_BOITE[boite]}/${d.id}`,
+      }
+    }),
+  }
+  await envoyerMail({ a: u.email, objet: objetAffectation(donnees), corps: texteAffectation(donnees), html: htmlAffectation(donnees) }, mode)
+  return true
+}
 
 // ─── Catégories (rangement manuel, une catégorie par demande) ───
 
@@ -408,13 +490,98 @@ demandesDevisRouter.post('/:id/separer', validate({ params: idParams }), async (
   ok(res, toDemandeDto(await trouver(d.id)))
 })
 
+// ─── Envoi de mails depuis GRAPH_BOITE (réponses et nouveaux mails) ───
+
+const adresses = z
+  .array(z.string().trim().toLowerCase().pipe(z.email('Adresse email invalide')))
+  .max(50)
+  .default([])
+const mailSchema = z.object({
+  a: adresses.refine((a) => a.length > 0, 'Indiquez au moins un destinataire'),
+  cc: adresses,
+  objet: z.string().trim().min(1, 'Indiquez un objet').max(500),
+  corps: z.string().trim().min(1, 'Le message est vide').max(100_000),
+  /** Fichiers déposés au préalable (POST /pieces-jointes) */
+  pieces: z
+    .array(z.object({ id: z.string().min(1).max(64), nom: z.string().trim().min(1).max(255), type: z.string().trim().max(255).default('application/octet-stream') }))
+    .max(PIECES_MAX, `${PIECES_MAX} pièces jointes au maximum`)
+    .default([]),
+})
+type MailInput = z.infer<typeof mailSchema>
+
+const toMailEnvoyeDto = (m: MailEnvoye) => ({
+  id: m.id,
+  demandeId: m.demandeId,
+  a: m.a ? m.a.split(',') : [],
+  cc: m.cc ? m.cc.split(',') : [],
+  objet: m.objet,
+  corps: m.corps,
+  // Le nom du fichier stocké reste côté serveur : le front télécharge par index
+  pieces: ((m.pieces as PieceEnvoyee[] | null) ?? []).map((p) => ({ nom: p.nom, type: p.type, taille: p.taille })),
+  envoyeParId: m.envoyeParId,
+  envoyeLe: m.envoyeLe.toISOString(),
+})
+
+/** Prépare les pièces, envoie, range les pièces avec le mail et l'enregistre. */
+async function envoyerEtEnregistrer(m: MailInput, envoyeParId: string, envoi: (pieces: PieceJointe[]) => Promise<void>, demandeId: string | null) {
+  const jointes = await preparer(m.pieces)
+  await envoi(jointes)
+  const pieces = await conserver(jointes)
+  return prisma.mailEnvoye.create({
+    data: { demandeId, a: m.a.join(','), cc: m.cc.join(','), objet: m.objet, corps: m.corps, envoyeParId, pieces: pieces as unknown as Prisma.InputJsonValue },
+  })
+}
+
+/** Le serveur peut-il envoyer, et depuis quelle adresse */
+demandesDevisRouter.get('/envoi', (_req, res) => {
+  ok(res, { actif: envoiParServeur(), expediteur: expediteur(), tailleMaxPiece: TAILLE_MAX_PIECE, tailleMaxTotale: TAILLE_MAX_TOTALE, piecesMax: PIECES_MAX })
+})
+
+/** Dépôt d'une pièce jointe avant l'envoi : le fichier brut dans le corps (application/octet-stream) */
+demandesDevisRouter.post('/pieces-jointes', corpsPiece, async (req, res) => {
+  ok(res, await deposer(req.body as Buffer))
+})
+
+/** Nouveau mail (Direction, Admin, ADCI) */
+demandesDevisRouter.post('/envoyer', gestionSeulement, validate({ body: mailSchema }), async (_req, res) => {
+  const m = res.locals.body as MailInput
+  const envoye = await envoyerEtEnregistrer(m, res.locals.user!.id, (pieces) => envoyerMail({ ...m, pieces }), null)
+  ok(res, toMailEnvoyeDto(envoye))
+})
+
+/** Réponse à un mail reçu, envoyée dans le même fil de discussion */
+demandesDevisRouter.post('/:id/repondre', validate({ params: idParams, body: mailSchema }), async (_req, res) => {
+  const d = await trouver(res.locals.params.id)
+  const m = res.locals.body as MailInput
+  const envoye = await envoyerEtEnregistrer(m, res.locals.user!.id, (pieces) => repondreMail(d.messageId, { ...m, pieces }), d.id)
+  ok(res, toMailEnvoyeDto(envoye))
+})
+
+/** Pièce jointe d'un mail envoyé : toujours téléchargée (jamais affichée sur le domaine de l'appli) */
+demandesDevisRouter.get('/envoyes/:id/pieces/:index', validate({ params: idParams.extend({ index: z.coerce.number().int().min(0) }) }), async (_req, res) => {
+  const m = await prisma.mailEnvoye.findUnique({ where: { id: res.locals.params.id } })
+  const p = ((m?.pieces as PieceEnvoyee[] | null) ?? [])[res.locals.params.index as number]
+  if (!p) throw new NotFoundError('Pièce jointe introuvable')
+  const type = p.type.toLowerCase().split(';')[0].trim()
+  const affichable = TYPES_AFFICHABLES.has(type)
+  if (type === 'application/pdf') res.removeHeader('Content-Security-Policy')
+  else res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox")
+  res.setHeader('Content-Type', affichable ? type : 'application/octet-stream')
+  res.setHeader('Content-Disposition', `${affichable ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(p.nom)}`)
+  // Nom de fichier généré par le serveur (uuid) : pas de risque de sortie du dossier de stockage
+  res.sendFile(path.join(dossierPiecesEnvoi(), path.basename(p.fichier)))
+})
+
 demandesDevisRouter.get('/:id', validate({ params: idParams }), async (_req, res) => {
   const d = await trouver(res.locals.params.id)
   const fil = await mailsDuFil(d.id, d.filId)
+  // Réponses envoyées à n'importe quel mail du fil
+  const reponses = await prisma.mailEnvoye.findMany({ where: { demandeId: { in: [d.id, ...fil.map((m) => m.id)] } }, orderBy: { envoyeLe: 'asc' } })
   ok(res, {
     ...toDemandeDto(d),
     corps: d.corps,
     fil: fil.map((m) => ({ id: m.id, recuLe: m.recuLe.toISOString(), expediteur: m.expediteur, objet: m.objet, statut: statutDemande.label(m.statut), boite: boiteDe(m) })),
+    reponses: reponses.map(toMailEnvoyeDto),
   })
 })
 

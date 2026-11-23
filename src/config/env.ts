@@ -1,6 +1,9 @@
 import { z } from 'zod'
 
 // Variables d'environnement validées au démarrage : l'API refuse de démarrer si l'une est absente ou invalide.
+/** Mode d'envoi propre à un type d'email ; vide ou absent : celui de ENVOI_MAIL (.env.example laisse ces lignes vides) */
+const modeEnvoiFacultatif = z.preprocess((v) => (v === '' ? undefined : v), z.enum(['off', 'dossier', 'graph']).optional())
+
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(4000),
@@ -55,6 +58,16 @@ const schema = z.object({
   /** off : l'email s'ouvre dans la messagerie de l'utilisateur · dossier : écrit des .eml (développement) · graph : envoyé depuis GRAPH_BOITE */
   ENVOI_MAIL: z.enum(['off', 'dossier', 'graph']).default('off'),
   ENVOI_MAIL_DOSSIER: z.string().default('data/mails-sortants'),
+  /** Pièces jointes des mails envoyés depuis l'application (à inclure dans les sauvegardes) */
+  ENVOI_MAIL_PIECES: z.string().default('data/mails-envoyes'),
+  /** Adresse(s) prévenue(s) à chaque nouveau ticket de support, séparées par des virgules. Vide : pas d'email */
+  TICKETS_EMAIL: z.string().default(''),
+  /** Envoi des emails de tickets, s'il doit différer de ENVOI_MAIL (ex. graph en local pour les recevoir vraiment). Vide : ENVOI_MAIL */
+  TICKETS_ENVOI: modeEnvoiFacultatif,
+  /** Envoi des emails d'invitation (accès), s'il doit différer de ENVOI_MAIL. Vide : ENVOI_MAIL */
+  INVITATIONS_ENVOI: modeEnvoiFacultatif,
+  /** Envoi des emails « demande affectée », s'il doit différer de ENVOI_MAIL. Vide : ENVOI_MAIL */
+  AFFECTATIONS_ENVOI: modeEnvoiFacultatif,
   /** Dossier des photos du journal de chantier */
   PHOTOS_STOCKAGE: z.string().default('data/photos'),
   /** Adresse publique du front, pour les liens envoyés par email (invitation, mot de passe oublié). Vide : CORS_ORIGIN. */

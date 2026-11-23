@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createApp } from '../../app.ts'
 import { env } from '../../config/env.ts'
 import { Role } from '../../generated/prisma/client.ts'
-import { hashPassword } from '../../lib/password.ts'
+import { hashPassword, PASSWORD_RULE } from '../../lib/password.ts'
 import { prisma } from '../../lib/prisma.ts'
 
 // Garde-fou : ces tests vident la table des utilisateurs
@@ -124,7 +124,8 @@ describe('/api/utilisateurs (Admin uniquement)', () => {
       .post('/api/utilisateurs')
       .send({ prenom: 'Nouveau', email: 'Nouveau@Test.local', role: "Chargé d'affaires", motDePasse: 'Initial-Pass-2026' })
     expect(res.status).toBe(201)
-    expect(res.body.data).toMatchObject({ email: 'nouveau@test.local', role: "Chargé d'affaires", aMotDePasse: true })
+    // Emails coupés pendant les tests : les accès ne partent pas, la question est posée à la 1re connexion
+    expect(res.body.data).toMatchObject({ email: 'nouveau@test.local', role: "Chargé d'affaires", aMotDePasse: true, choixMotDePasse: true, accesEnvoye: false })
     expect((await loginAs('nouveau@test.local', 'Initial-Pass-2026')).res.status).toBe(200)
   })
 
@@ -175,24 +176,50 @@ describe('sessions coupées après un changement de mot de passe', () => {
 describe('invitation et mot de passe oublié', () => {
   const jetonDuLien = (lien: string) => new URL(lien).searchParams.get('jeton')!
 
-  it('invitation sans envoi d’email : le lien est remis à l’admin, il sert une seule fois', async () => {
+  it('invitation sans envoi d’email : les accès provisoires sont remis à l’admin', async () => {
     const invite = await prisma.utilisateur.create({ data: { prenom: 'Ivan', nom: 'Invité', email: 'invite@test.local', role: Role.ADCI } })
     const { agent: admin } = await loginAs('admin@test.local')
     const res = await admin.post(`/api/utilisateurs/${invite.id}/inviter`)
     expect(res.status).toBe(200)
-    expect(res.body.data).toMatchObject({ envoye: false, lien: expect.stringContaining('/definir-mot-de-passe?jeton=') })
-    const jeton = jetonDuLien(res.body.data.lien)
+    expect(res.body.data).toMatchObject({ envoye: false, email: 'invite@test.local', motDePasse: expect.stringMatching(/^\w{4}-\w{4}-\w{4}$/) })
+    expect(PASSWORD_RULE.test(res.body.data.motDePasse)).toBe(true)
 
-    const anon = request.agent(app)
-    expect((await anon.get(`/api/auth/jeton/${jeton}`)).body.data).toEqual({ type: 'invitation', prenom: 'Ivan', email: 'invite@test.local' })
-    expect((await anon.post('/api/auth/definir-mot-de-passe').send({ jeton, motDePasse: 'court' })).status).toBe(400)
-    const ok = await anon.post('/api/auth/definir-mot-de-passe').send({ jeton, motDePasse: 'Mon-Pass-Invite-1' })
-    expect(ok.status).toBe(200)
-    expect(ok.body.data).toMatchObject({ email: 'invite@test.local', aMotDePasse: true })
-    expect((await anon.get('/api/auth/me')).status).toBe(200)
-    // Lien déjà utilisé
-    expect((await anon.get(`/api/auth/jeton/${jeton}`)).status).toBe(404)
-    expect((await request(app).post('/api/auth/definir-mot-de-passe').send({ jeton, motDePasse: 'Autre-Pass-2026-x' })).status).toBe(404)
+    // Première connexion : la question est posée
+    const { res: connexion } = await loginAs('invite@test.local', res.body.data.motDePasse)
+    expect(connexion.status).toBe(200)
+    expect(connexion.body.data).toMatchObject({ aMotDePasse: true, choixMotDePasse: true })
+  })
+
+  it('première connexion : garder le mot de passe provisoire', async () => {
+    const { agent: admin } = await loginAs('admin@test.local')
+    const { id } = (await prisma.utilisateur.findUnique({ where: { email: 'invite@test.local' } }))!
+    const { motDePasse } = (await admin.post(`/api/utilisateurs/${id}/inviter`)).body.data
+    const { agent } = await loginAs('invite@test.local', motDePasse)
+    const garde = await agent.post('/api/auth/premiere-connexion').send({})
+    expect(garde.status).toBe(200)
+    expect(garde.body.data.choixMotDePasse).toBe(false)
+    // Le mot de passe provisoire reste valable, et la question n'est plus posée
+    const { res: retour } = await loginAs('invite@test.local', motDePasse)
+    expect(retour.body.data.choixMotDePasse).toBe(false)
+  })
+
+  it('première connexion : choisir un nouveau mot de passe (règle appliquée, ancien refusé)', async () => {
+    const { agent: admin } = await loginAs('admin@test.local')
+    const { id } = (await prisma.utilisateur.findUnique({ where: { email: 'invite@test.local' } }))!
+    const { motDePasse } = (await admin.post(`/api/utilisateurs/${id}/inviter`)).body.data
+    const { agent } = await loginAs('invite@test.local', motDePasse)
+    expect((await agent.post('/api/auth/premiere-connexion').send({ motDePasse: 'court' })).status).toBe(400)
+    const change = await agent.post('/api/auth/premiere-connexion').send({ motDePasse: 'Mon-Pass-Invite-1' })
+    expect(change.status).toBe(200)
+    expect(change.body.data.choixMotDePasse).toBe(false)
+    // La session est rouverte, l'ancien mot de passe ne marche plus, le nouveau oui
+    expect((await agent.get('/api/auth/me')).status).toBe(200)
+    expect((await loginAs('invite@test.local', motDePasse)).res.status).toBe(401)
+    expect((await loginAs('invite@test.local', 'Mon-Pass-Invite-1')).res.status).toBe(200)
+  })
+
+  it('première connexion : réservée à une personne connectée', async () => {
+    expect((await request(app).post('/api/auth/premiere-connexion').send({})).status).toBe(401)
   })
 
   it('pas d’invitation pour un compte désactivé, ni pour un non-admin', async () => {
