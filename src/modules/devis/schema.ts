@@ -1,6 +1,7 @@
 import { CATEGORIES, PLANIFICATIONS, RELANCES_DEVIS, RESULTATS_DEVIS, STATUTS_ADCI, STATUTS_CONDUCTEUR } from '@gd/shared/types'
 import { z } from 'zod'
 import type { Prisma } from '../../generated/prisma/client.ts'
+import { siteSchema } from '../../lib/site.ts'
 import { categorie, planification, relanceDevis, resultatDevis, statutADCI, statutConducteur } from '../../lib/labels.ts'
 
 const date = z.iso.date().nullable()
@@ -14,6 +15,7 @@ export const devisSchema = z.object({
   categorie: z.enum(CATEGORIES),
   clientId: z.string().min(1, 'Le client est obligatoire'),
   adresse: texte(500).min(1, 'L’adresse est obligatoire'),
+  ...siteSchema,
   descriptif: texte(10_000).default(''),
   conducteurId: z.string().min(1).nullable().default(null),
   datePassage: date.default(null),
@@ -63,6 +65,10 @@ export function toDevisData(input: Partial<DevisInput>, creation = false) {
     ...(v.categorie !== undefined && { categorie: categorie.key(v.categorie) }),
     ...(clientId !== undefined && { client: { connect: { id: clientId } } }),
     ...(v.adresse !== undefined && { adresse: v.adresse }),
+    ...(v.codePostal !== undefined && { codePostal: v.codePostal }),
+    ...(v.ville !== undefined && { ville: v.ville }),
+    ...(v.latitude !== undefined && { latitude: v.latitude }),
+    ...(v.longitude !== undefined && { longitude: v.longitude }),
     ...(v.descriptif !== undefined && { descriptif: v.descriptif }),
     ...(conducteurId !== undefined && { conducteur: conducteurId ? { connect: { id: conducteurId } } : creation ? undefined : { disconnect: true } }),
     ...(v.datePassage !== undefined && { datePassage: toDate(v.datePassage) }),

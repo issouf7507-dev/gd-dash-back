@@ -13,12 +13,14 @@ import { ok } from '../../lib/response.ts'
 import { requireAuth, requireRole } from '../../middleware/auth.ts'
 import { validate } from '../../middleware/validate.ts'
 import { dossierPhotos, ecrirePhoto, effacerPhotos, PHOTOS_MAX_PAR_OBSERVATION, TAILLE_MAX_PHOTO, typeImage } from './photos.ts'
+import { siteDto, siteSchema } from '../../lib/site.ts'
 
 export const toChantierDto = (c: Chantier) => ({
   id: c.id,
   numero: c.numero,
   devisNumeros: c.devisNumeros as string[],
   adresse: c.adresse,
+  ...siteDto(c),
   clientId: c.clientId,
   categorie: categorie.label(c.categorie),
   equipes: c.equipes,
@@ -60,6 +62,7 @@ export const chantierSchema = z.object({
   numero: z.string().trim().min(1, 'Le numéro est obligatoire').max(50),
   devisNumeros: z.array(z.string().trim().min(1).max(50)).max(50).default([]),
   adresse: z.string().trim().min(1, 'L’adresse est obligatoire').max(500),
+  ...siteSchema,
   clientId: z.string().min(1, 'Le client est obligatoire'),
   categorie: z.enum(CATEGORIES),
   equipes: z.string().trim().max(500).default(''),
