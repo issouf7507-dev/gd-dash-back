@@ -1,5 +1,6 @@
 import type { Devis, Prisma, SuiviDevis } from '../../generated/prisma/client.ts'
 import { categorie, planification, relanceDevis, resultatDevis, statutADCI, statutConducteur, typeSuiviDevis } from '../../lib/labels.ts'
+import { siteDto } from '../../lib/site.ts'
 
 const isoDate = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null)
 
@@ -32,6 +33,7 @@ export function toDevisDto(d: Devis & { suivi?: Suivi[] }) {
     categorie: categorie.label(d.categorie),
     clientId: d.clientId,
     adresse: d.adresse,
+    ...siteDto(d),
     descriptif: d.descriptif,
     conducteurId: d.conducteurId,
     datePassage: isoDate(d.datePassage),

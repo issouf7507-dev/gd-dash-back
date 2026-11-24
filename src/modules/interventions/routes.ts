@@ -10,6 +10,7 @@ import { prisma } from '../../lib/prisma.ts'
 import { ok } from '../../lib/response.ts'
 import { requireAuth, requireRole } from '../../middleware/auth.ts'
 import { validate } from '../../middleware/validate.ts'
+import { siteDto, siteSchema } from '../../lib/site.ts'
 
 export const toInterventionDto = (i: Intervention) => ({
   id: i.id,
@@ -18,6 +19,7 @@ export const toInterventionDto = (i: Intervention) => ({
   categorie: categorie.label(i.categorie),
   clientId: i.clientId,
   adresse: i.adresse,
+  ...siteDto(i),
   descriptif: i.descriptif,
   technicienId: i.technicienId,
   datePassage: isoDate(i.datePassage),
@@ -43,6 +45,7 @@ export const interventionSchema = z.object({
   categorie: z.enum(CATEGORIES),
   clientId: z.string().min(1, 'Le client est obligatoire'),
   adresse: texte(500).min(1, 'L’adresse est obligatoire'),
+  ...siteSchema,
   descriptif: texte(10_000).default(''),
   technicienId: z.string().min(1).nullable().default(null),
   datePassage: date.default(null),

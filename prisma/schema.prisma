@@ -213,20 +213,48 @@ model JetonAuth {
 // ─────────────────────────────────────────────────────────────
 
 model Client {
-  id        String     @id @default(cuid())
-  nom       String     @unique @db.VarChar(191)
-  type      TypeClient @default(SYNDIC)
-  email     String?    @db.VarChar(191)
-  telephone String?    @db.VarChar(30)
-  actif     Boolean    @default(true)
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
+  id         String     @id @default(cuid())
+  nom        String     @unique @db.VarChar(191)
+  type       TypeClient @default(SYNDIC)
+  email      String?    @db.VarChar(191)
+  telephone  String?    @db.VarChar(30)
+  /// Code de la bibliothèque clients (ex. CLT00109), clé des imports Excel
+  code       String?    @unique @db.VarChar(30)
+  /// Famille d'origine (ex. « Organismes et syndicats »)
+  famille    String?    @db.VarChar(60)
+  adresse    String?    @db.VarChar(191)
+  codePostal String?    @db.VarChar(10)
+  ville      String?    @db.VarChar(100)
+  actif      Boolean    @default(true)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
 
   devis         Devis[]
   interventions Intervention[]
   chantiers     Chantier[]
 
   @@map("clients")
+}
+
+/// Fournisseurs, sous-traitants, loueurs… (bibliothèque fournisseurs, importable depuis Excel)
+model Fournisseur {
+  id         String   @id @default(cuid())
+  /// Code de la bibliothèque (ex. 001DIAG), clé des imports Excel
+  code       String?  @unique @db.VarChar(30)
+  nom        String   @db.VarChar(191)
+  /// Ex. « SOUS TRAITANTS », « NEGOCE MATERIAUX »
+  famille    String?  @db.VarChar(60)
+  email      String?  @db.VarChar(191)
+  telephone  String?  @db.VarChar(30)
+  adresse    String?  @db.VarChar(191)
+  codePostal String?  @db.VarChar(10)
+  ville      String?  @db.VarChar(100)
+  actif      Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([nom])
+  @@map("fournisseurs")
 }
 
 model Intervenant {
@@ -258,6 +286,11 @@ model Devis {
   clientId         String
   client           Client            @relation(fields: [clientId], references: [id])
   adresse          String            @db.VarChar(500)
+  /// Site d'intervention : code postal, commune et position (Base Adresse Nationale)
+  codePostal       String?           @db.VarChar(10)
+  ville            String?           @db.VarChar(100)
+  latitude         Float?
+  longitude        Float?
   descriptif       String            @db.Text
   conducteurId     String?
   conducteur       Utilisateur?      @relation("DevisConducteur", fields: [conducteurId], references: [id], onDelete: SetNull)
@@ -308,6 +341,11 @@ model Intervention {
   clientId      String
   client        Client        @relation(fields: [clientId], references: [id])
   adresse       String        @db.VarChar(500)
+  /// Site d'intervention : code postal, commune et position (Base Adresse Nationale)
+  codePostal    String?       @db.VarChar(10)
+  ville         String?       @db.VarChar(100)
+  latitude      Float?
+  longitude     Float?
   descriptif    String        @db.Text
   technicienId  String?
   technicien    Intervenant?  @relation(fields: [technicienId], references: [id], onDelete: SetNull)
@@ -342,6 +380,11 @@ model Chantier {
   /// Un chantier peut regrouper plusieurs devis, ex. ["DGD26-0506/1","DGD26-0507"]
   devisNumeros        Json
   adresse             String         @db.VarChar(500)
+  /// Site d'intervention : code postal, commune et position (Base Adresse Nationale)
+  codePostal          String?        @db.VarChar(10)
+  ville               String?        @db.VarChar(100)
+  latitude            Float?
+  longitude           Float?
   clientId            String
   client              Client         @relation(fields: [clientId], references: [id])
   categorie           Categorie
