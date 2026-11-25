@@ -3,6 +3,7 @@ import { authRouter } from './modules/auth/routes.ts'
 import { chantiersRouter, observationsRouter } from './modules/chantiers/routes.ts'
 import { clientsRouter } from './modules/clients/routes.ts'
 import { fournisseursRouter } from './modules/fournisseurs/routes.ts'
+import { gestionRouter } from './modules/gestion/routes.ts'
 import { demandesDevisRouter } from './modules/demandes-mail/routes.ts'
 import { devisRouter } from './modules/devis/routes.ts'
 import { equipesRouter } from './modules/equipes/routes.ts'
@@ -24,6 +25,7 @@ apiRouter.use('/auth', authRouter)
 apiRouter.use('/utilisateurs', utilisateursRouter)
 apiRouter.use('/clients', clientsRouter)
 apiRouter.use('/fournisseurs', fournisseursRouter)
+apiRouter.use('/gestion', gestionRouter)
 apiRouter.use('/devis', devisRouter)
 apiRouter.use('/imports-devis', importsDevisRouter)
 apiRouter.use('/demandes-devis', demandesDevisRouter)
