@@ -173,21 +173,22 @@ model Utilisateur {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  devisConduits     Devis[]         @relation("DevisConducteur")
-  chantiersCharges  Chantier[]      @relation("ChantierChargeAffaires")
+  devisConduits     Devis[]           @relation("DevisConducteur")
+  chantiersCharges  Chantier[]        @relation("ChantierChargeAffaires")
   observations      Observation[]
   relancesEnvoyees  Relance[]
-  devisValides      Devis[]         @relation("DevisValidePar")
+  devisValides      Devis[]           @relation("DevisValidePar")
   suivisDevis       SuiviDevis[]
   jetons            JetonAuth[]
   auditLogs         AuditLog[]
-  importsTraites    ImportMail[]    @relation("ImportTraitePar")
-  demandesTraitees  DemandeMail[]   @relation("DemandeTraiteePar")
-  demandesAffectees DemandeMail[]   @relation("DemandeAffecteeA")
+  importsTraites    ImportMail[]      @relation("ImportTraitePar")
+  demandesTraitees  DemandeMail[]     @relation("DemandeTraiteePar")
+  demandesAffectees DemandeMail[]     @relation("DemandeAffecteeA")
   mailsEnvoyes      MailEnvoye[]
   tickets           Ticket[]
   messagesTickets   TicketMessage[]
   notifications     Notification[]
+  exercicesGestion  ExerciceGestion[]
   equipes           Equipe[]
 
   @@map("utilisateurs")
@@ -781,4 +782,31 @@ model Notification {
   @@index([utilisateurId, luLe])
   @@index([createdAt])
   @@map("notifications")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Gestion : tableau de bord financier (prévisions, réalisé, frais généraux, salaires)
+// ─────────────────────────────────────────────────────────────
+
+/// Une année du tableau de bord de gestion (repris du classeur Excel « Tableau de bord »).
+/// Contient les salaires : réservé à la Direction et à l'Admin.
+model ExerciceGestion {
+  id            String       @id @default(cuid())
+  annee         Int          @unique
+  /// CA visé, SHM prévu, répartition des coûts directs, mois suivis
+  parametres    Json
+  /// 12 mois de prévisions (jours, effectifs, heures)
+  previsions    Json
+  /// 12 mois de réalisé (CA, coûts, heures non vendables, en-cours)
+  realise       Json
+  /// Comptes de frais généraux : prévu et réalisé par mois
+  fraisGeneraux Json
+  /// Salariés de production et intérimaires : coût et heures par mois
+  salaires      Json
+  modifieParId  String?
+  modifiePar    Utilisateur? @relation(fields: [modifieParId], references: [id], onDelete: SetNull)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@map("exercices_gestion")
 }

@@ -73,22 +73,14 @@ export interface LigneTableur {
   cellules: string[]
 }
 
-/** Lignes de la première feuille du classeur, valeurs converties en texte. */
-export function lireXlsx(buf: Buffer): LigneTableur[] {
-  const zip = lireZip(buf)
-  const lire = (nom: string) => zip.get(nom)?.toString('utf8')
 
-  const classeur = lire('xl/workbook.xml')
-  if (!classeur) throw invalide('classeur introuvable dans l’archive')
-  // Première feuille dans l'ordre du classeur, et son fichier d'après les relations
-  const rid = /<sheet\b[^>]*\br:id="([^"]+)"/.exec(classeur)?.[1]
-  const cible = rid && new RegExp(`<Relationship\\b[^>]*Id="${rid}"[^>]*Target="([^"]+)"`).exec(lire('xl/_rels/workbook.xml.rels') ?? '')?.[1]
-  const chemin = cible ? (cible.startsWith('/') ? cible.slice(1) : `xl/${cible}`) : 'xl/worksheets/sheet1.xml'
-  const feuille = lire(chemin)
-  if (!feuille) throw invalide('feuille introuvable')
+export interface FeuilleTableur {
+  nom: string
+  lignes: LigneTableur[]
+}
 
-  const partages = [...(lire('xl/sharedStrings.xml') ?? '').matchAll(/<si>([\s\S]*?)<\/si>/g)].map((m) => texte(m[1]))
-
+/** Lignes d'une feuille XML, valeurs converties en texte (cellule vide : chaîne vide) */
+function lireLignes(feuille: string, partages: string[]): LigneTableur[] {
   const lignes: LigneTableur[] = []
   for (const r of feuille.matchAll(/<row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g)) {
     const numero = Number(/\br="(\d+)"/.exec(r[1])?.[1] ?? lignes.length + 1)
@@ -109,4 +101,30 @@ export function lireXlsx(buf: Buffer): LigneTableur[] {
     lignes.push({ numero, cellules: Array.from(cellules, (x) => x ?? '') })
   }
   return lignes
+}
+
+/** Toutes les feuilles du classeur, dans l'ordre (valeurs calculées des formules, telles qu'enregistrées par Excel). */
+export function lireClasseur(buf: Buffer): FeuilleTableur[] {
+  const zip = lireZip(buf)
+  const lire = (nom: string) => zip.get(nom)?.toString('utf8')
+  const classeur = lire('xl/workbook.xml')
+  if (!classeur) throw invalide('classeur introuvable dans l’archive')
+  const relations = lire('xl/_rels/workbook.xml.rels') ?? ''
+  const partages = [...(lire('xl/sharedStrings.xml') ?? '').matchAll(/<si>([\s\S]*?)<\/si>/g)].map((m) => texte(m[1]))
+  const feuilles: FeuilleTableur[] = []
+  for (const s of classeur.matchAll(/<sheet\b([^>]*)\/?>/g)) {
+    const nom = decoder(/\bname="([^"]*)"/.exec(s[1])?.[1] ?? '')
+    const rid = /\br:id="([^"]+)"/.exec(s[1])?.[1]
+    const cible = rid && new RegExp(`<Relationship\\b[^>]*Id="${rid}"[^>]*Target="([^"]+)"`).exec(relations)?.[1]
+    if (!cible) continue
+    const xml = lire(cible.startsWith('/') ? cible.slice(1) : `xl/${cible}`)
+    if (xml) feuilles.push({ nom, lignes: lireLignes(xml, partages) })
+  }
+  if (!feuilles.length) throw invalide('aucune feuille lisible')
+  return feuilles
+}
+
+/** Lignes de la première feuille du classeur, valeurs converties en texte. */
+export function lireXlsx(buf: Buffer): LigneTableur[] {
+  return lireClasseur(buf)[0].lignes
 }
