@@ -113,6 +113,12 @@ enum TypeClient {
   ENTREPRISE  @map("Entreprise")
 }
 
+enum ValidationIntervention {
+  A_VALIDER @map("À valider")
+  VALIDEE   @map("Validée")
+  REFUSEE   @map("Refusée")
+}
+
 enum TypeIntervenant {
   INTERNE       @map("Interne")
   SOUS_TRAITANT @map("Sous-traitant")
@@ -170,26 +176,29 @@ model Utilisateur {
   sessionVersion  Int      @default(0)
   /// Mot de passe provisoire (invitation) : à la première connexion, la personne choisit de le garder ou de le changer
   choixMotDePasse Boolean  @default(false)
+  /// Pages ouvertes à la personne (clés de @gd/shared/acces) ; vide : celles de son rôle
+  pages           Json?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  devisConduits     Devis[]           @relation("DevisConducteur")
-  chantiersCharges  Chantier[]        @relation("ChantierChargeAffaires")
-  observations      Observation[]
-  relancesEnvoyees  Relance[]
-  devisValides      Devis[]           @relation("DevisValidePar")
-  suivisDevis       SuiviDevis[]
-  jetons            JetonAuth[]
-  auditLogs         AuditLog[]
-  importsTraites    ImportMail[]      @relation("ImportTraitePar")
-  demandesTraitees  DemandeMail[]     @relation("DemandeTraiteePar")
-  demandesAffectees DemandeMail[]     @relation("DemandeAffecteeA")
-  mailsEnvoyes      MailEnvoye[]
-  tickets           Ticket[]
-  messagesTickets   TicketMessage[]
-  notifications     Notification[]
-  exercicesGestion  ExerciceGestion[]
-  equipes           Equipe[]
+  devisConduits         Devis[]           @relation("DevisConducteur")
+  chantiersCharges      Chantier[]        @relation("ChantierChargeAffaires")
+  observations          Observation[]
+  relancesEnvoyees      Relance[]
+  devisValides          Devis[]           @relation("DevisValidePar")
+  suivisDevis           SuiviDevis[]
+  jetons                JetonAuth[]
+  auditLogs             AuditLog[]
+  importsTraites        ImportMail[]      @relation("ImportTraitePar")
+  demandesTraitees      DemandeMail[]     @relation("DemandeTraiteePar")
+  demandesAffectees     DemandeMail[]     @relation("DemandeAffecteeA")
+  mailsEnvoyes          MailEnvoye[]
+  tickets               Ticket[]
+  messagesTickets       TicketMessage[]
+  notifications         Notification[]
+  exercicesGestion      ExerciceGestion[]
+  interventionsValidees Intervention[]    @relation("InterventionsValidees")
+  equipes               Equipe[]
 
   @@map("utilisateurs")
 }
@@ -269,7 +278,9 @@ model Intervenant {
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
 
-  interventions Intervention[]
+  interventions       Intervention[]
+  /// Interventions où il fait partie de l'équipe
+  interventionsEquipe Intervention[] @relation("EquipeIntervention")
 
   @@map("intervenants")
 }
@@ -335,39 +346,52 @@ model Devis {
 }
 
 model Intervention {
-  id            String        @id @default(cuid())
-  numero        String        @unique @db.VarChar(50)
-  planification Planification @default(A_PLANIFIER)
-  categorie     Categorie
-  clientId      String
-  client        Client        @relation(fields: [clientId], references: [id])
-  adresse       String        @db.VarChar(500)
+  id              String                 @id @default(cuid())
+  numero          String                 @unique @db.VarChar(50)
+  planification   Planification          @default(A_PLANIFIER)
+  categorie       Categorie
+  clientId        String
+  client          Client                 @relation(fields: [clientId], references: [id])
+  adresse         String                 @db.VarChar(500)
   /// Site d'intervention : code postal, commune et position (Base Adresse Nationale)
-  codePostal    String?       @db.VarChar(10)
-  ville         String?       @db.VarChar(100)
-  latitude      Float?
-  longitude     Float?
-  descriptif    String        @db.Text
-  technicienId  String?
-  technicien    Intervenant?  @relation(fields: [technicienId], references: [id], onDelete: SetNull)
-  datePassage   DateTime?     @db.Date
-  statutADCI    StatutADCI    @default(NON_TRAITE)
-  validePar     String?       @db.VarChar(100)
-  numeroFacture String?       @db.VarChar(50)
+  codePostal      String?                @db.VarChar(10)
+  ville           String?                @db.VarChar(100)
+  latitude        Float?
+  longitude       Float?
+  descriptif      String                 @db.Text
+  technicienId    String?
+  technicien      Intervenant?           @relation(fields: [technicienId], references: [id], onDelete: SetNull)
+  /// Autres techniciens et sous-traitants qui travaillent sur l'intervention (avec le technicien responsable)
+  equipe          Intervenant[]          @relation("EquipeIntervention")
+  heuresPrevues   Decimal?               @db.Decimal(8, 2)
+  budgetAlloue    Decimal?               @db.Decimal(12, 2)
+  /// Validation par la Direction ou l'Admin (équipe, heures, budget)
+  validation      ValidationIntervention @default(A_VALIDER)
+  validationMotif String?                @db.VarChar(500)
+  valideParId     String?
+  valideur        Utilisateur?           @relation("InterventionsValidees", fields: [valideParId], references: [id], onDelete: SetNull)
+  valideLe        DateTime?
+  datePassage     DateTime?              @db.Date
+  statutADCI      StatutADCI             @default(NON_TRAITE)
+  validePar       String?                @db.VarChar(100)
+  numeroFacture   String?                @db.VarChar(50)
   /// Lien réel vers le devis ; numeroDevis garde le numéro saisi s'il ne correspond à aucun devis connu
-  devisId       String?
-  devis         Devis?        @relation(fields: [devisId], references: [id], onDelete: SetNull)
-  numeroDevis   String?       @db.VarChar(50)
-  commentaires  String        @db.Text
-  demandes      DemandeMail[]
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+  devisId         String?
+  devis           Devis?                 @relation(fields: [devisId], references: [id], onDelete: SetNull)
+  numeroDevis     String?                @db.VarChar(50)
+  /// Numéro de devis venant d'ADCI (saisi à la main, absent de la plateforme)
+  devisADCI       Boolean                @default(false)
+  commentaires    String                 @db.Text
+  demandes        DemandeMail[]
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
 
   @@index([statutADCI])
   @@index([datePassage])
   @@index([clientId])
   @@index([technicienId])
   @@index([devisId])
+  @@index([validation])
   @@map("interventions")
 }
 

@@ -5,15 +5,15 @@ import express, { Router } from 'express'
 import { z } from 'zod'
 import type { ExerciceGestion, Prisma, Utilisateur } from '../../generated/prisma/client.ts'
 import { ConflictError, NotFoundError } from '../../lib/app-error.ts'
-import { Role } from '../../lib/labels.ts'
 import { prisma } from '../../lib/prisma.ts'
 import { ok } from '../../lib/response.ts'
-import { requireAuth, requireRole } from '../../middleware/auth.ts'
+import { requireAuth, requirePage } from '../../middleware/auth.ts'
 import { validate } from '../../middleware/validate.ts'
 import { lireClasseurGestion } from './import-classeur.ts'
 
 export const gestionRouter = Router()
-gestionRouter.use(requireAuth, requireRole(Role.DIRECTION, Role.ADMIN))
+// Salaires compris : page « Gestion financière », ouverte par défaut à la Direction et à l'Admin
+gestionRouter.use(requireAuth, requirePage('gestion'))
 
 /* ─── Validation ────────────────────────────────────────── */
 

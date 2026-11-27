@@ -13,5 +13,7 @@ export function toUtilisateurDto(u: Utilisateur) {
     aMotDePasse: u.passwordHash !== null,
     /** Mot de passe provisoire : à la première connexion, la personne choisit de le garder ou de le changer */
     choixMotDePasse: u.choixMotDePasse,
+    /** Pages ouvertes à la personne ; null : celles de son rôle */
+    pages: Array.isArray(u.pages) ? (u.pages as string[]) : null,
   }
 }

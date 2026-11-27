@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { env } from '../../config/env.ts'
-import { BoiteDemande, Prisma, ResultatDevis, SourceDevis, StatutDemande } from '../../generated/prisma/client.ts'
+import { BoiteDemande, Prisma, ResultatDevis, SourceDevis, StatutDemande, type Role } from '../../generated/prisma/client.ts'
 import { ConflictError } from '../../lib/app-error.ts'
 import { logger } from '../../lib/logger.ts'
 import { isUniqueViolation } from '../../lib/prisma-errors.ts'
@@ -13,7 +13,7 @@ import { prisma } from '../../lib/prisma.ts'
 import { toDevisCreate, type DevisInput } from '../devis/schema.ts'
 import { boiteDemande } from '../../lib/labels.ts'
 import { toChantierData, type ChantierInput } from '../chantiers/routes.ts'
-import { toInterventionData, type InterventionInput } from '../interventions/routes.ts'
+import { avecEquipe, demanderValidation, toInterventionData, validationCreation, type InterventionInput } from '../interventions/routes.ts'
 import { decoderMail } from '../import-mail/lecture.ts'
 import type { Rapprochement } from '../import-mail/match-client.ts'
 import { sourceDossier } from '../import-mail/sources/dossier.ts'
@@ -116,14 +116,17 @@ export async function marquerTraitee(db: Prisma.TransactionClient, demandeId: st
 }
 
 /** Crée l'intervention à partir d'une demande et la marque « Intervention créée », en une seule transaction. */
-export async function creerInterventionDepuisDemande(demandeId: string, input: InterventionInput, userId: string) {
-  const data = (await toInterventionData(input)) as Prisma.InterventionUncheckedCreateInput
-  return prisma.$transaction(async (tx) => {
-    await marquerTraitee(tx, demandeId, { statut: StatutDemande.INTERVENTION_CREEE, traiteParId: userId, traiteLe: new Date() })
-    const intervention = await tx.intervention.create({ data })
-    await tx.demandeMail.update({ where: { id: demandeId }, data: { interventionId: intervention.id } })
-    return intervention
+export async function creerInterventionDepuisDemande(demandeId: string, input: InterventionInput, user: { id: string; role: Role; prenom: string; nom: string }) {
+  // Validée d'office si la Direction ou l'Admin la crée, sinon à valider
+  const data = { ...(await toInterventionData(input, true)), ...validationCreation(user) } as Prisma.InterventionUncheckedCreateInput
+  const intervention = await prisma.$transaction(async (tx) => {
+    await marquerTraitee(tx, demandeId, { statut: StatutDemande.INTERVENTION_CREEE, traiteParId: user.id, traiteLe: new Date() })
+    const i = await tx.intervention.create({ data, include: avecEquipe })
+    await tx.demandeMail.update({ where: { id: demandeId }, data: { interventionId: i.id } })
+    return i
   })
+  if (intervention.validation === 'A_VALIDER') await demanderValidation(intervention, user, false)
+  return intervention
 }
 
 /** Champs du chantier pré-remplis à partir de la demande. Le n° de chantier reste à saisir. */

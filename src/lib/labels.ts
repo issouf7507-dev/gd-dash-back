@@ -12,6 +12,7 @@ import {
   type StatutChantier as StatutChantierLabel,
   type StatutFactureSaisi,
   type TypeIntervenant as TypeIntervenantLabel,
+  type ValidationIntervention as ValidationInterventionLabel,
 } from '@gd/shared/types'
 import {
   Categorie,
@@ -31,6 +32,7 @@ import {
   TypeSuiviDevis,
   TypeClient,
   TypeIntervenant,
+  ValidationIntervention,
 } from '../generated/prisma/client.ts'
 
 export const ROLE_LABELS: Record<Role, RoleLabel> = {
@@ -122,6 +124,7 @@ export const typeClient = mapping<TypeClient, TypeClientLabel>({
 // ─── Intervenants, chantiers, factures ───────────────────────
 
 export const typeIntervenant = mapping<TypeIntervenant, TypeIntervenantLabel>({ INTERNE: 'Interne', SOUS_TRAITANT: 'Sous-traitant' })
+export const validationIntervention = mapping<ValidationIntervention, ValidationInterventionLabel>({ A_VALIDER: 'À valider', VALIDEE: 'Validée', REFUSEE: 'Refusée' })
 export const statutChantier = mapping<StatutChantier, StatutChantierLabel>({
   A_VENIR: 'À venir',
   EN_ATTENTE_SIGNATURE: 'En attente signature',

@@ -1,4 +1,6 @@
-import { ROLES } from '@gd/shared/types'
+import { memesPages, PAGE_CLES } from '@gd/shared/acces'
+import { ROLES, type Role as RoleLabel } from '@gd/shared/types'
+import { Prisma } from '../../generated/prisma/client.ts'
 import { Router } from 'express'
 import { z } from 'zod'
 import { AppError, ConflictError, ForbiddenError, NotFoundError } from '../../lib/app-error.ts'
@@ -39,7 +41,16 @@ const createSchema = z.object({
   actif: z.boolean().default(true),
   /** Mot de passe initial (en attendant l'invitation par email) */
   motDePasse: motDePasse.optional(),
+  /** Pages ouvertes à la personne ; null : celles de son rôle */
+  pages: z.array(z.enum(PAGE_CLES)).max(PAGE_CLES.length).nullable().optional(),
 })
+
+/** Pages à enregistrer : rien (null) si ce sont exactement celles du rôle */
+function pagesAEnregistrer(pages: string[] | null | undefined, role: RoleLabel | undefined) {
+  if (pages === undefined) return undefined
+  if (pages === null || (role && memesPages(role, pages))) return Prisma.DbNull
+  return [...new Set(pages)]
+}
 const updateSchema = createSchema.partial()
 
 /** Mode d'envoi des emails d'accès */
@@ -62,6 +73,11 @@ async function envoyerAcces(user: { prenom: string; email: string; role: Role },
   return true
 }
 
+/** Les accès des nouveaux utilisateurs partent-ils par email ? (INVITATIONS_ENVOI, sinon ENVOI_MAIL) */
+utilisateursRouter.get('/envoi-acces', (_req, res) => {
+  ok(res, { actif: modeAcces() !== 'off' })
+})
+
 utilisateursRouter.get('/', async (_req, res) => {
   const users = await prisma.utilisateur.findMany({ orderBy: [{ prenom: 'asc' }, { nom: 'asc' }] })
   ok(res, users.map(toUtilisateurDto))
@@ -74,10 +90,10 @@ utilisateursRouter.get('/:id', validate({ params: idParams }), async (_req, res)
 })
 
 utilisateursRouter.post('/', validate({ body: createSchema }), async (_req, res) => {
-  const { motDePasse: mdp, role, ...data } = res.locals.body as z.infer<typeof createSchema>
+  const { motDePasse: mdp, role, pages, ...data } = res.locals.body as z.infer<typeof createSchema>
   try {
     const user = await prisma.utilisateur.create({
-      data: { ...data, role: roleKey(role), passwordHash: mdp ? await hashPassword(mdp) : null, choixMotDePasse: !!mdp },
+      data: { ...data, role: roleKey(role), pages: pagesAEnregistrer(pages, role), passwordHash: mdp ? await hashPassword(mdp) : null, choixMotDePasse: !!mdp },
     })
     // Mot de passe choisi à la création : la personne le reçoit par email avec son identifiant.
     // Un échec d'envoi n'annule pas la création : l'administrateur transmet alors les accès lui-même.
@@ -99,7 +115,7 @@ utilisateursRouter.post('/', validate({ body: createSchema }), async (_req, res)
 
 utilisateursRouter.patch('/:id', validate({ params: idParams, body: updateSchema }), async (_req, res) => {
   const id = res.locals.params.id as string
-  const { motDePasse: mdp, role, ...data } = res.locals.body as z.infer<typeof updateSchema>
+  const { motDePasse: mdp, role, pages, ...data } = res.locals.body as z.infer<typeof updateSchema>
   const me = res.locals.user!
 
   // Garde-fou : un administrateur ne peut pas se bloquer lui-même
@@ -114,6 +130,7 @@ utilisateursRouter.patch('/:id', validate({ params: idParams, body: updateSchema
       data: {
         ...data,
         ...(role && { role: roleKey(role) }),
+        ...(pages !== undefined && { pages: pagesAEnregistrer(pages, role ?? roleLabel((await prisma.utilisateur.findUniqueOrThrow({ where: { id }, select: { role: true } })).role)) }),
         // Nouveau mot de passe : les sessions déjà ouvertes (peut-être par un tiers) sont coupées
         ...(mdp && { passwordHash: await hashPassword(mdp), sessionVersion: { increment: 1 } }),
       },

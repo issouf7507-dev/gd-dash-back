@@ -1,7 +1,9 @@
 import type { NextFunction, Request, Response } from 'express'
 import { ForbiddenError, UnauthenticatedError } from '../lib/app-error.ts'
 import { prisma } from '../lib/prisma.ts'
-import type { Role } from '../generated/prisma/client.ts'
+import { aAccesPage, type PageCle } from '@gd/shared/acces'
+import type { Role, Utilisateur } from '../generated/prisma/client.ts'
+import { roleLabel } from '../lib/labels.ts'
 import { readSession, SESSION_COOKIE } from '../modules/auth/session.ts'
 
 /**
@@ -14,6 +16,20 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   if (!user || !user.actif || user.sessionVersion !== session!.version) return next(new UnauthenticatedError())
   res.locals.user = user
   next()
+}
+
+/** La personne a-t-elle cette page (cochée pour elle, ou celles de son rôle) ? */
+export const aLaPage = (user: Pick<Utilisateur, 'role' | 'pages'>, page: PageCle) =>
+  aAccesPage({ role: roleLabel(user.role), pages: Array.isArray(user.pages) ? (user.pages as string[]) : null }, page)
+
+/** Exige l'une des pages données (à placer après requireAuth) : module entier fermé sans elle. */
+export function requirePage(...pages: PageCle[]) {
+  return (_req: Request, res: Response, next: NextFunction) => {
+    const user = res.locals.user
+    if (!user) return next(new UnauthenticatedError())
+    if (!pages.some((p) => aLaPage(user, p))) return next(new ForbiddenError())
+    next()
+  }
 }
 
 /** Exige l'un des rôles donnés (à placer après requireAuth). */
