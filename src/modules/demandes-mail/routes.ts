@@ -1,15 +1,15 @@
 import { Router } from 'express'
 import path from 'node:path'
 import { z } from 'zod'
-import { BoiteDemande, StatutDemande, type CategorieDemande, type DemandeMail, type MailEnvoye, type Prisma } from '../../generated/prisma/client.ts'
+import { BoiteDemande, StatutDemande, type CategorieDemande, type DemandeMail, type MailEnvoye, type Prisma, type Utilisateur } from '../../generated/prisma/client.ts'
 import { ConflictError, ForbiddenError, NotFoundError } from '../../lib/app-error.ts'
 import { env } from '../../config/env.ts'
-import { boiteDemande, Role, statutDemande } from '../../lib/labels.ts'
+import { boiteDemande, statutDemande } from '../../lib/labels.ts'
 import { isUniqueViolation } from '../../lib/prisma-errors.ts'
 import { logger } from '../../lib/logger.ts'
 import { prisma } from '../../lib/prisma.ts'
 import { ok } from '../../lib/response.ts'
-import { requireAuth, requireRole } from '../../middleware/auth.ts'
+import { aLaPage, requireAuth, requirePage } from '../../middleware/auth.ts'
 import type { NextFunction, Request, Response } from 'express'
 import { validate } from '../../middleware/validate.ts'
 import { toDevisDto } from '../devis/dto.ts'
@@ -43,9 +43,8 @@ import {
 
 export const demandesDevisRouter = Router()
 
-/** Rôles qui gèrent les mails reçus (relève, rangement, affectation) */
-const GESTION: Role[] = [Role.DIRECTION, Role.ADMIN, Role.ADCI]
-export const gereLesDemandes = (role: Role) => GESTION.includes(role)
+/** Gèrent les mails reçus (relève, rangement, affectation) : ceux qui ont la page « Demandes reçues » (par défaut Direction, Admin, ADCI) */
+export const gereLesDemandes = (user: Utilisateur) => aLaPage(user, 'demandes')
 
 /** Chemins de l'API qui ne sont pas l'id d'une demande */
 const RESERVES = new Set(['etat', 'relever', 'categories', 'dossiers', 'fils', 'affecter', 'envoi', 'envoyer', 'envoyes', 'pieces-jointes'])
@@ -60,7 +59,7 @@ const ACTION_DEMANDE = /^\/([^/]+)\/(?:creer-devis|lier|ignorer|reprendre|repond
  */
 async function accesDemandes(req: Request, res: Response, next: NextFunction) {
   const user = res.locals.user!
-  if (gereLesDemandes(user.role)) return next()
+  if (gereLesDemandes(user)) return next()
   if (req.method === 'GET' && LECTURES.has(req.path)) return next()
   // Pièce jointe déposée pour une réponse (la personne peut répondre aux demandes qui lui sont affectées)
   if (req.method === 'POST' && req.path === '/pieces-jointes') return next()
@@ -76,8 +75,8 @@ async function accesDemandes(req: Request, res: Response, next: NextFunction) {
 }
 
 demandesDevisRouter.use(requireAuth, accesDemandes)
-/** Réservé à Direction, Admin et ADCI */
-const gestionSeulement = requireRole(...GESTION)
+/** Réservé à ceux qui ont la page « Demandes reçues » */
+const gestionSeulement = requirePage('demandes')
 
 const idParams = z.object({ id: z.string().min(1) })
 const BOITES = ['Devis', 'Intervention', 'Chantier', 'Facture'] as const
@@ -186,7 +185,7 @@ const listeQuery = z.object({ dossier: z.string().min(1).optional(), boite: z.en
 demandesDevisRouter.get('/', validate({ query: listeQuery }), async (_req, res) => {
   const user = res.locals.user!
   // Hors gestion, on ne voit que ses demandes, toutes boîtes confondues
-  const { dossier, boite, client } = gereLesDemandes(user.role)
+  const { dossier, boite, client } = gereLesDemandes(user)
     ? (res.locals.query as z.infer<typeof listeQuery>)
     : { dossier: MES_DEMANDES, boite: 'Devis' as const, client: undefined }
   const pour = dossier?.startsWith(POUR) ? dossier.slice(POUR.length) : dossier === MES_DEMANDES ? user.id : null
@@ -637,7 +636,7 @@ demandesDevisRouter.post('/:id/lier', validate({ params: idParams, body: z.objec
 demandesDevisRouter.post('/:id/creer-intervention', validate({ params: idParams, body: interventionSchema }), async (_req, res) => {
   const d = await trouver(res.locals.params.id)
   verifierNonTraitee(d)
-  const intervention = await creerInterventionDepuisDemande(d.id, res.locals.body as InterventionInput, res.locals.user!.id).catch(mapInterventionError)
+  const intervention = await creerInterventionDepuisDemande(d.id, res.locals.body as InterventionInput, res.locals.user!).catch(mapInterventionError)
   ok(res, toInterventionDto(intervention), { status: 201 })
 })
 

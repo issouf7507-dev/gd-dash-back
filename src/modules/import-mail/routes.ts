@@ -3,18 +3,18 @@ import path from 'node:path'
 import { z } from 'zod'
 import { StatutImport, type ImportMail } from '../../generated/prisma/client.ts'
 import { ConflictError, NotFoundError } from '../../lib/app-error.ts'
-import { Role, statutImport } from '../../lib/labels.ts'
+import { statutImport } from '../../lib/labels.ts'
 import { isUniqueViolation } from '../../lib/prisma-errors.ts'
 import { prisma } from '../../lib/prisma.ts'
 import { ok } from '../../lib/response.ts'
-import { requireAuth, requireRole } from '../../middleware/auth.ts'
+import { requireAuth, requirePage } from '../../middleware/auth.ts'
 import { validate } from '../../middleware/validate.ts'
 import { toDevisDto } from '../devis/dto.ts'
 import { devisSchema, type DevisInput } from '../devis/schema.ts'
 import { creerDevisDepuisImport, devisPropose, dossierStockage, etatReleve, relever, type DonneesImport } from './service.ts'
 
 export const importsDevisRouter = Router()
-importsDevisRouter.use(requireAuth, requireRole(Role.DIRECTION, Role.ADMIN, Role.ADCI))
+importsDevisRouter.use(requireAuth, requirePage('demandes'))
 
 const idParams = z.object({ id: z.string().min(1) })
 

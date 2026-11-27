@@ -15,6 +15,7 @@
     "db:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
     "db:seed": "prisma db seed",
+    "db:donnees-test": "node --env-file-if-exists=.env --import tsx prisma/donnees-test.ts",
     "import:exemples": "node --env-file-if-exists=.env --import tsx src/modules/import-mail/generer-exemples.ts"
   },
   "devDependencies": {
